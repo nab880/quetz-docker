@@ -19,8 +19,12 @@ echo "=== Building ${IMAGE} (platform=${PLATFORM}; CUDA 11.7 + GPGPU-Sim; first 
 docker build --platform "${PLATFORM}" -t "${IMAGE}" -f quetz-docker/Dockerfile.balar .
 
 echo "=== Running Balar tests ==="
+docker_env=(-e "UPDATE_GOLD=${UPDATE_GOLD:-0}")
+if [ "$(uname -s)" = "Darwin" ]; then
+    docker_env+=(-e "SKIP_QUETZ_CROSSSTACK=1")
+fi
 docker run --rm --platform "${PLATFORM}" \
-    -e "UPDATE_GOLD=${UPDATE_GOLD:-0}" \
+    "${docker_env[@]}" \
     -v "${ROOT}/sst-elements:/src/sst-elements" \
     -v "${ROOT}/quetz-docker/run-balar-tests.sh:/usr/local/bin/run-balar-tests.sh:ro" \
     "${IMAGE}" \

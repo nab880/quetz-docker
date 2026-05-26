@@ -5,7 +5,7 @@ Validates [Balar](https://github.com/sstsimulator/sst-elements/tree/devel/src/ss
 ## Prerequisites
 
 - Docker with enough disk (~15 GB image) and RAM for GPGPU-Sim builds
-- **Apple Silicon (M1/M2/M3):** the build script forces `--platform linux/amd64` because GPGPU-Sim’s accelwattch uses x86 SSE flags. Emulation is slower but required.
+- **Apple Silicon (M1/M2/M3):** the build script forces `--platform linux/amd64` because GPGPU-Sim’s accelwattch uses x86 SSE flags. Emulation is slower but required. Balar/GPGPU-Sim tests (#3–#7) run under this image; **Quetz cross-stack on the balar image (item #2)** is skipped on macOS hosts (`SKIP_QUETZ_CROSSSTACK=1`) because Rosetta cannot satisfy Quetz mmap — run item #2 on native **linux/amd64** CI instead.
 - **Note:** upstream `balar/.ignore` skips the element during `./autogen.sh`; `Dockerfile.balar` removes that file so Balar is configured with CUDA/GPGPU-Sim.
 - Optional: `UPDATE_GOLD=1` to refresh `tests/refFiles/*.out` after intentional stat changes
 

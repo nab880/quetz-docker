@@ -74,8 +74,12 @@ if [ "${UPDATE_GOLD:-0}" = "1" ] && [ -f "${VECADD_STATS}" ]; then
     echo "Updated gold: ${VECADD_GOLD}"
 fi
 
-# Combined-tree validation: run Quetz suite on the balar image when the element is mounted.
-if [ -d /src/sst-elements/src/sst/elements/quetz ] && [ -x /usr/local/bin/run-quetz-tests.sh ]; then
+# Combined-tree validation: run Quetz suite on the balar image when the element is built.
+# Item #2 requires native linux/amd64 (GPGPU-Sim image is amd64-only). On macOS hosts,
+# Docker runs that image under Rosetta and Quetz usermode tests fail mmap ("rosetta error").
+if [ "${SKIP_QUETZ_CROSSSTACK:-0}" = "1" ]; then
+    echo "NOTE: SKIP_QUETZ_CROSSSTACK=1 — skip Quetz-on-balar-image (item #2); use native linux/amd64 CI"
+elif [ -d /src/sst-elements/src/sst/elements/quetz ] && [ -x /usr/local/bin/run-quetz-tests.sh ]; then
     if sst-info quetz 2>/dev/null | grep -q QuetzComponent; then
         echo "=== Quetz testsuite on balar image (combined tree) ==="
         if ! /usr/local/bin/run-quetz-tests.sh; then
