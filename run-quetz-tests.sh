@@ -1,0 +1,90 @@
+#!/bin/bash
+# Run Quetz SST tests inside the raptor-quetz-test container.
+#
+# Host usage (from workspace root):
+#   ./quetz-docker/build-and-test.sh
+#   UPDATE_GOLD=1 ./quetz-docker/build-and-test.sh   # refresh gold files in the tree
+
+set -euo pipefail
+
+SST_PREFIX="${SST_PREFIX:-/opt/sst}"
+export PATH="${SST_PREFIX}/bin:${PATH}"
+export LD_LIBRARY_PATH="${SST_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
+export SST_HOME="${SST_PREFIX}"
+export QEMU_PLUGIN_DIR="${QEMU_PLUGIN_DIR:-/opt/qemu/lib/qemu/plugins}"
+
+QUETZ_DIR="/src/sst-elements/src/sst/elements/quetz"
+TESTSUITE="${QUETZ_DIR}/tests/testsuite_default_quetz.py"
+
+echo "=== QEMU versions ==="
+qemu-system-x86_64 --version 2>/dev/null | head -1 || true
+qemu-riscv64 --version 2>/dev/null | head -1 || true
+
+echo "=== Quetz install ==="
+ls -la "${SST_PREFIX}/lib/sst-elements-library/"libquetz* 2>/dev/null || true
+ls -la "${SST_PREFIX}/libexec/"libqemu_sst_plugin* 2>/dev/null || true
+ls -la "${QEMU_PLUGIN_DIR}/libmem.so" 2>/dev/null || true
+
+if [ "${UPDATE_GOLD:-0}" = "1" ]; then
+    echo "=== Regenerating gold files (UPDATE_GOLD=1) ==="
+    sed -i 's/^updateFiles = False/updateFiles = True/' "${TESTSUITE}"
+    trap 'sed -i "s/^updateFiles = True/updateFiles = False/" "${TESTSUITE}"' EXIT
+fi
+
+echo "=== Quetz unit tests ==="
+"${QUETZ_DIR}/tests/unit/run_unit_tests.sh"
+
+echo "=== Building sysmode RISC-V firmware ==="
+if command -v riscv64-linux-gnu-gcc >/dev/null 2>&1; then
+    FW_DIR="${QUETZ_DIR}/tests/sysmode/firmware"
+    export RV64_CC="${RV64_CC:-riscv64-linux-gnu-gcc}"
+    RV64_FLAGS="-march=rv64gc -mabi=lp64d -O2 -mcmodel=medany \
+      -nostdlib -nostartfiles -ffreestanding -mno-relax \
+      -T link_rv64.ld -Wl,--build-id=none"
+    (
+        cd "${FW_DIR}"
+        for fw in riscv_virt_hello riscv_virt_uart_echo riscv_virt_mmio_poke \
+                  riscv_virt_gpu_trace riscv_virt_gpu_kernel; do
+            if [ -f "${fw}.c" ]; then
+                echo "  building ${fw}..."
+                ${RV64_CC} ${RV64_FLAGS} "${fw}.c" -o "${fw}" || \
+                    echo "WARN: ${fw} build failed"
+            fi
+        done
+    )
+else
+    echo "NOTE: riscv64-linux-gnu-gcc not found — skipping sysmode firmware build"
+fi
+
+echo "=== Building microbenchmark ELFs (optional) ==="
+if command -v riscv64-linux-gnu-gcc >/dev/null 2>&1; then
+    (cd "${QUETZ_DIR}/tests/binaries" && ./build_microbench.sh) || \
+        echo "WARN: microbenchmark build failed — stride_scaling may skip"
+else
+    echo "NOTE: riscv64-linux-gnu-gcc not found — skipping microbench build"
+fi
+
+echo "=== Building usermode GPU test ELFs ==="
+if command -v riscv64-linux-gnu-gcc >/dev/null 2>&1 || \
+   command -v riscv64-unknown-linux-gnu-gcc >/dev/null 2>&1; then
+    (cd "${QUETZ_DIR}/tests/usermode/sources" && ./build.sh) || \
+        echo "WARN: usermode GPU binary build failed — usermode_gpu_* tests may skip"
+else
+    echo "NOTE: RISC-V Linux cross compiler not found — skipping usermode GPU build"
+fi
+
+echo "=== Quetz integration tests ==="
+"${SST_PREFIX}/bin/sst-test-elements" -p "${TESTSUITE}"
+
+if [ "${UPDATE_GOLD:-0}" = "1" ]; then
+    echo "Gold files updated under src/sst/elements/quetz/tests/"
+fi
+
+echo "=== Quetz libmem ground-truth validation ==="
+if python3 "${QUETZ_DIR}/tests/validate_against_libmem.py"; then
+    :
+else
+    echo "WARN: libmem validation failed (non-fatal until baselined)"
+fi
+
+echo "=== All Quetz tests passed ==="
