@@ -1,0 +1,131 @@
+# SST + Balar (GPGPU-Sim) + optional Quetz test environment.
+#
+# Build from workspace root (parent of sst-core/, sst-elements/, quetz-docker/):
+#   docker build -t raptor-balar-test -f quetz-docker/Dockerfile.balar .
+#
+# Run: ./quetz-docker/build-and-test-balar.sh
+
+FROM nvidia/cuda:11.7.1-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV SST_PREFIX=/opt/sst
+ENV PATH="${SST_PREFIX}/bin:${PATH}"
+ENV LD_LIBRARY_PATH="${SST_PREFIX}/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}"
+
+ENV CUDA_INSTALL_PATH=/usr/local/cuda
+ENV CUDA_HOME=/usr/local/cuda
+ENV GPU_ARCH=sm_70
+ENV GPGPUSIM_ROOT=/opt/gpgpu-sim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    autoconf \
+    automake \
+    bison \
+    build-essential \
+    ca-certificates \
+    curl \
+    flex \
+    git \
+    libcap-ng-dev \
+    libglib2.0-dev \
+    libglu1-mesa-dev \
+    libopenmpi-dev \
+    libpixman-1-dev \
+    libslirp-dev \
+    libtool \
+    libtool-bin \
+    ninja-build \
+    openmpi-bin \
+    pkg-config \
+    python3 \
+    python3-dev \
+    python3-blessings \
+    python3-pip \
+    python3-pygments \
+    xutils-dev \
+    zlib1g-dev \
+    gcc-riscv64-linux-gnu \
+    libc6-dev-riscv64-cross \
+    && rm -rf /var/lib/apt/lists/*
+
+# QEMU 9.2 with plugins (Quetz sysmode / plugin tests when quetz element is present).
+ARG QEMU_VERSION=9.2.1
+ENV QEMU_PREFIX=/opt/qemu
+COPY quetz-docker/qemu-overlay /docker/qemu-overlay
+RUN curl -fsSL "https://download.qemu.org/qemu-${QEMU_VERSION}.tar.xz" \
+        | tar xJ -C /tmp \
+    && cd "/tmp/qemu-${QEMU_VERSION}" \
+    && sh /docker/qemu-overlay/apply-qemu-overlay.sh "/tmp/qemu-${QEMU_VERSION}" \
+    && ./configure \
+         --prefix="${QEMU_PREFIX}" \
+         --target-list=riscv64-softmmu,aarch64-softmmu,arm-softmmu,i386-softmmu,riscv64-linux-user,aarch64-linux-user,x86_64-linux-user \
+         --enable-plugins \
+    && make -j2 \
+    && make -j2 plugins \
+    && make install \
+    && mkdir -p "${QEMU_PREFIX}/lib/qemu/plugins" \
+    && cp -a build/contrib/plugins/*.so "${QEMU_PREFIX}/lib/qemu/plugins/" 2>/dev/null \
+        || cp -a contrib/plugins/*.so "${QEMU_PREFIX}/lib/qemu/plugins/" 2>/dev/null \
+        || true \
+    && rm -rf "/tmp/qemu-${QEMU_VERSION}"
+
+ENV QEMU_PLUGIN_DIR="${QEMU_PREFIX}/lib/qemu/plugins"
+
+RUN mkdir -p "${SST_PREFIX}/bin" "${SST_PREFIX}/lib" "${SST_PREFIX}/libexec" \
+    && ln -sf "${QEMU_PREFIX}/bin/qemu-riscv64" "${SST_PREFIX}/bin/qemu-riscv64" \
+    && ln -sf "${QEMU_PREFIX}/bin/qemu-aarch64" "${SST_PREFIX}/bin/qemu-aarch64" \
+    && ln -sf "${QEMU_PREFIX}/bin/qemu-x86_64" "${SST_PREFIX}/bin/qemu-x86_64" \
+    && ln -sf "${QEMU_PREFIX}/bin/qemu-system-riscv64" "${SST_PREFIX}/bin/qemu-system-riscv64" \
+    && ln -sf "${QEMU_PREFIX}/bin/qemu-system-aarch64" "${SST_PREFIX}/bin/qemu-system-aarch64" \
+    && ln -sf "${QEMU_PREFIX}/bin/qemu-system-i386" "${SST_PREFIX}/bin/qemu-system-i386" \
+    && ln -sf "${QEMU_PREFIX}/bin/qemu-system-arm" "${SST_PREFIX}/bin/qemu-system-arm"
+
+# GPGPU-Sim (SST integration mode).
+ARG GPGPUSIM_REPO=https://github.com/accel-sim/gpgpu-sim_distribution.git
+ARG GPGPUSIM_BRANCH=dev
+RUN git clone --depth 1 --branch "${GPGPUSIM_BRANCH}" "${GPGPUSIM_REPO}" "${GPGPUSIM_ROOT}" \
+    && bash -lc "cd '${GPGPUSIM_ROOT}' && source setup_environment sst && make -j2"
+
+WORKDIR /src
+
+COPY sst-core /src/sst-core
+COPY sst-elements /src/sst-elements
+
+RUN cd /src/sst-core \
+    && ./autogen.sh \
+    && mkdir -p /build/sst-core && cd /build/sst-core \
+    && /src/sst-core/configure --prefix="${SST_PREFIX}" \
+    && make -j2 install
+
+RUN bash -lc "cd /src/sst-elements \
+    && rm -f src/sst/elements/balar/.ignore \
+    && rm -f src/sst/elements/shogun/.ignore \
+    && rm -f src/sst/elements/merlin/.ignore \
+    && ./autogen.sh \
+    && find /src/sst-elements/src/sst/elements/quetz -name '*.lo' -delete 2>/dev/null || true \
+    && mkdir -p /build/sst-elements && cd /build/sst-elements \
+    && source '${GPGPUSIM_ROOT}/setup_environment' sst \
+    && export GPU_ARCH='${GPU_ARCH}' \
+    && /src/sst-elements/configure \
+         --prefix='${SST_PREFIX}' \
+         --with-sst-core='${SST_PREFIX}' \
+         --with-cuda='${CUDA_INSTALL_PATH}' \
+         --with-gpgpusim='${GPGPUSIM_ROOT}' \
+         --with-qemu-prefix='${QEMU_PREFIX}' \
+         --without-pin \
+    && make -j2 install"
+
+RUN "${SST_PREFIX}/bin/sst-register" SST_ELEMENT_SOURCE balar=/src/sst-elements/src/sst/elements/balar \
+    && "${SST_PREFIX}/bin/sst-register" SST_ELEMENT_TESTS balar=/src/sst-elements/src/sst/elements/balar/tests
+
+RUN if [ -d /src/sst-elements/src/sst/elements/quetz ]; then \
+        "${SST_PREFIX}/bin/sst-register" SST_ELEMENT_SOURCE quetz=/src/sst-elements/src/sst/elements/quetz \
+        && "${SST_PREFIX}/bin/sst-register" SST_ELEMENT_TESTS quetz=/src/sst-elements/src/sst/elements/quetz/tests; \
+    fi
+
+COPY quetz-docker/run-balar-tests.sh /usr/local/bin/run-balar-tests.sh
+COPY quetz-docker/run-quetz-tests.sh /usr/local/bin/run-quetz-tests.sh
+RUN chmod +x /usr/local/bin/run-balar-tests.sh /usr/local/bin/run-quetz-tests.sh
+
+WORKDIR /src/sst-elements/src/sst/elements/balar/tests
+CMD ["/usr/local/bin/run-balar-tests.sh"]

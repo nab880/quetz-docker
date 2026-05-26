@@ -9,6 +9,13 @@ Docker build and test environment for the [Quetz](https://github.com/sstsimulato
 
 Use it to build and run the Quetz regression suite without installing SST or QEMU on your host.
 
+**Balar + GPGPU-Sim** tests use a separate CUDA-based image — see [README-balar.md](README-balar.md) and `./quetz-docker/build-and-test-balar.sh`.
+
+| Script | Image | Tests |
+|--------|-------|-------|
+| `./quetz-docker/build-and-test.sh` | `raptor-quetz-test` (`Dockerfile`) | Quetz testsuite (no CUDA) |
+| `./quetz-docker/build-and-test-balar.sh` | `raptor-balar-test` (`Dockerfile.balar`) | Balar / GPGPU-Sim + QuetzTestCPU contract tests |
+
 ---
 
 ## Prerequisites
@@ -199,9 +206,13 @@ Linux-user SIGSEGV hook sources under `qemu-overlay/linux-user/` are included fo
 
 ```
 quetz-docker/
-├── Dockerfile                  # Ubuntu 24.04 image: QEMU + SST + Quetz
-├── build-and-test.sh           # Build image + run full testsuite
-├── run-quetz-tests.sh          # In-container test driver (installed to /usr/local/bin)
+├── Dockerfile                  # Ubuntu 24.04 image: QEMU + SST + Quetz (lightweight)
+├── Dockerfile.balar            # CUDA 11.7 + GPGPU-Sim + SST + Balar (+ Quetz if present)
+├── build-and-test.sh           # Build quetz image + run Quetz testsuite
+├── build-and-test-balar.sh     # Build balar image + run Balar testsuite
+├── run-quetz-tests.sh          # In-container Quetz test driver
+├── run-balar-tests.sh          # In-container Balar test driver
+├── README-balar.md             # Balar / QuetzTestCPU contract test guide
 ├── rebuild-quetz-usermode-gpu.sh  # Fast libquetz rebuild + GPU tests
 ├── qemu-overlay/               # QEMU 9.2.1 MMIO bridge overlay
 │   ├── apply-qemu-overlay.sh
