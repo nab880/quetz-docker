@@ -19,9 +19,12 @@ export GPGPUSIM_ROOT="${GPGPUSIM_ROOT:-/opt/gpgpu-sim}"
 export CUDA_INSTALL_PATH="${CUDA_INSTALL_PATH:-/usr/local/cuda}"
 export OPENCL_REMOTE_GPU_HOST="${OPENCL_REMOTE_GPU_HOST:-}"
 export OPENCL_REMOTE_GPU_PORT="${OPENCL_REMOTE_GPU_PORT:-}"
+export PTXAS_CUDA_INSTALL_PATH="${PTXAS_CUDA_INSTALL_PATH:-${CUDA_INSTALL_PATH:-/usr/local/cuda}}"
 
 # shellcheck source=/dev/null
+set +u
 source "${GPGPUSIM_ROOT}/setup_environment" sst
+set -u
 
 BALAR_TESTS="/src/sst-elements/src/sst/elements/balar/tests"
 TESTSUITE="${BALAR_TESTS}/testsuite_default_balar.py"
@@ -44,10 +47,7 @@ rebuild_quetz_from_mount() {
     fi
     echo "=== Rebuilding quetz from mounted sources ==="
     mkdir -p "${bld}"
-    rsync -a --delete \
-        --exclude='tests/sst_test_outputs' \
-        --exclude='*.lo' --exclude='*.la' --exclude='*.o' \
-        "${src}/" "${bld}/" 2>/dev/null || cp -a "${src}/." "${bld}/"
+    cp -a "${src}/." "${bld}/"
     if [ -f "${bld}/Makefile" ]; then
         make -j"$(nproc)" -C "${bld}" install || return 1
         "${SST_PREFIX}/bin/sst-register" SST_ELEMENT_SOURCE quetz="${src}" || true
