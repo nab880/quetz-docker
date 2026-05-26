@@ -1,17 +1,54 @@
 # quetz-docker
 
-Docker image and QEMU overlay for building and running the Quetz SST testsuite.
+Docker build and test environment for the [Quetz](https://github.com/sstsimulator/sst-elements/tree/master/src/sst/elements/quetz) SST element. This repo produces a self-contained image with:
 
-## Workspace layout
+- **QEMU 9.2.1** (user-mode + system-mode, with plugin API)
+- **QEMU MMIO overlay** — `sst-mmio-bridge` device for synchronous guest MMIO via Quetz shared memory
+- **SST-Core** and **SST-Elements** (`memHierarchy`, `mmu`, `quetz`)
+- **`libqemu_sst_plugin.so`** — Quetz's QEMU plugin
 
-This repo is intended to sit alongside `sst-core/` and `sst-elements/` in a common workspace:
+Use it to build and run the Quetz regression suite without installing SST or QEMU on your host.
+
+---
+
+## Prerequisites
+
+| Requirement | Notes |
+|-------------|--------|
+| **Docker** | Desktop or Engine; ~8 GB free disk for the image |
+| **RAM** | Build uses `make -j2` to reduce OOM risk; 8 GB+ recommended |
+| **Git** | To clone the sibling repos below |
+
+No host install of SST, QEMU, or cross-compilers is required — everything is inside the image.
+
+---
+
+## Workspace setup
+
+`quetz-docker` does **not** contain Quetz source code. Clone three repos into a common parent directory:
+
+```bash
+mkdir -p ~/dev/quetz-workspace && cd ~/dev/quetz-workspace
+
+git clone https://github.com/sstsimulator/sst-core.git
+git clone https://github.com/sstsimulator/sst-elements.git   # or your fork/branch
+git clone https://github.com/YOUR_ORG/quetz-docker.git
+```
+
+Expected layout:
 
 ```
-workspace/
-  sst-core/        # SST core (separate git repo)
-  sst-elements/    # SST elements incl. quetz (separate git repo)
-  quetz-docker/    # this repo
+quetz-workspace/
+├── sst-core/          # SST core
+├── sst-elements/      # SST elements (Quetz lives under src/sst/elements/quetz/)
+└── quetz-docker/      # this repo
 ```
+
+All commands below assume your shell is at **`quetz-workspace/`** (the parent of all three directories).
+
+> **Tip:** If you keep a local checkout named `raptor/` with the same three siblings, that works too — only the relative paths matter.
+
+---
 
 ## Quick start
 
@@ -21,56 +58,192 @@ From the workspace root:
 ./quetz-docker/build-and-test.sh
 ```
 
-First build can take 15–30 minutes (QEMU + SST compile with `-j2`).
+This will:
 
-Manual build:
+1. Build the Docker image `raptor-quetz-test` (~15–30 minutes on first run)
+2. Run the full Quetz testsuite inside a container
+3. Mount your host `sst-elements/` tree so Python tests and guest binaries are read live
+
+Success looks like:
+
+```text
+== TESTING PASSED ==
+=== All Quetz tests passed ===
+```
+
+---
+
+## Manual build and run
+
+### Build the image only
 
 ```bash
 docker build -t raptor-quetz-test -f quetz-docker/Dockerfile .
-docker run --rm -v "$PWD/sst-elements:/src/sst-elements" raptor-quetz-test
 ```
+
+Override the image name:
+
+```bash
+export RAPTOR_QUETZ_IMAGE=my-quetz-test
+docker build -t "${RAPTOR_QUETZ_IMAGE}" -f quetz-docker/Dockerfile .
+```
+
+### Run tests only (image already built)
+
+```bash
+docker run --rm \
+  -v "$(pwd)/sst-elements:/src/sst-elements" \
+  raptor-quetz-test \
+  /usr/local/bin/run-quetz-tests.sh
+```
+
+The volume mount means changes under `sst-elements/src/sst/elements/quetz/tests/` (Python, SDL, gold files, firmware sources) are picked up immediately. **C/C++ library changes** still require an image rebuild (see below).
+
+---
+
+## What runs inside the container
+
+`/usr/local/bin/run-quetz-tests.sh` (copied from this repo at build time) does the following:
+
+1. Print QEMU and Quetz install paths
+2. Run Quetz **unit tests** (`tests/unit/run_unit_tests.sh`)
+3. Cross-compile **sysmode RISC-V firmware** (`tests/sysmode/firmware/*.c`)
+4. Build optional **microbenchmark** and **usermode GPU** ELFs
+5. Run **integration tests** via `sst-test-elements -p testsuite_default_quetz.py`
+6. Optionally run **libmem ground-truth validation** (skipped if `libmem.so` is absent)
+
+---
+
+## Rebuild after code changes
+
+| What changed | Action |
+|--------------|--------|
+| Python tests, SDL, gold files | Re-run tests only (no rebuild) |
+| Quetz C++ / plugin / `Makefile.am` / `configure.m4` | Full rebuild: `./quetz-docker/build-and-test.sh` |
+| QEMU overlay (`qemu-overlay/`) or `Dockerfile` | Full rebuild (QEMU layer is baked in) |
+| Fast iteration on Quetz C++ only | `./quetz-docker/rebuild-quetz-usermode-gpu.sh` (rebuilds `libquetz` inside existing image) |
+
+### Full rebuild
+
+```bash
+./quetz-docker/build-and-test.sh
+```
+
+### Fast C++ overlay (usermode GPU path)
+
+After the image exists, this script rebuilds Quetz inside the container and runs the usermode GPU tests:
+
+```bash
+./quetz-docker/rebuild-quetz-usermode-gpu.sh
+```
+
+---
 
 ## Refresh gold files
 
-When QEMU or statistic output changes intentionally:
+Usermode tests compare SST stdout against `*.gold` reference files. When statistic output changes intentionally (new QEMU version, plugin change, etc.):
 
 ```bash
 UPDATE_GOLD=1 ./quetz-docker/build-and-test.sh
 ```
 
-This sets `updateFiles = True` in `testsuite_default_quetz.py` for one run, then restores it.
+Or, if the image is already built:
 
-## Image and layout
+```bash
+UPDATE_GOLD=1 docker run --rm \
+  -v "$(pwd)/sst-elements:/src/sst-elements" \
+  raptor-quetz-test \
+  /usr/local/bin/run-quetz-tests.sh
+```
 
-| Item | Value |
-|------|--------|
-| Image tag | `raptor-quetz-test` (override with `RAPTOR_QUETZ_IMAGE`) |
-| SST prefix | `/opt/sst` |
-| QEMU prefix | `/opt/qemu` |
-| Mounted tree | `sst-elements/` → `/src/sst-elements` (live edits without rebuild) |
+This temporarily sets `updateFiles = True` in `testsuite_default_quetz.py`, writes new gold files into your mounted `sst-elements` tree, then restores the flag.
+
+**Do not** refresh gold to mask hangs or plugin load failures — only use when the new numbers are correct.
+
+---
+
+## Image layout
+
+| Path | Contents |
+|------|----------|
+| `/opt/sst` | SST install prefix (`sst`, `sst-test-elements`, `libquetz.so`) |
+| `/opt/sst/libexec/` | `libqemu_sst_plugin.so` |
+| `/opt/qemu` | Patched QEMU 9.2.1 binaries |
+| `/opt/qemu/lib/qemu/plugins/` | QEMU contrib plugins (incl. `libmem.so` when built) |
+| `/src/sst-elements` | Mounted from host at run time |
+
+Environment variables set in the container:
+
+- `SST_HOME=/opt/sst`
+- `QEMU_PLUGIN_DIR=/opt/qemu/lib/qemu/plugins`
+
+---
 
 ## QEMU overlay
 
-`qemu-overlay/` patches QEMU 9.2.1 at Docker build time with:
+The `qemu-overlay/` directory is applied to upstream QEMU 9.2.1 during the Docker build (`apply-qemu-overlay.sh`). It adds:
 
-- `sst-mmio-bridge` sysmode device (synchronous MMIO via Quetz shared memory)
-- `quetz_ipc_client.c` — standalone IPC client for the bridge
+| Component | Purpose |
+|-----------|---------|
+| `hw/misc/sst_mmio_bridge.c` | Sysmode `-device sst-mmio-bridge` — guest MMIO loads/stores block until SST responds |
+| `quetz_ipc_client.c` | Standalone shared-memory IPC client (no SST dependency) |
+| `include/quetz/quetz_ipc_types.h` | C mirror of Quetz IPC layout |
 
-Applied by `qemu-overlay/apply-qemu-overlay.sh` during the Docker build.
+The Quetz launcher passes `-device sst-mmio-bridge,shmname=...,base=...,size=...` when `QUETZ_MMIO_PAYLOAD=1` is set (sysmode only). See `sst-elements` Quetz docs for MMIO payload delivery details.
 
-## Requirements
+Linux-user SIGSEGV hook sources under `qemu-overlay/linux-user/` are included for future work but are **not** wired into the current overlay script.
 
-- Docker with enough disk (~8 GB image) and RAM (build uses `make -j2` to avoid OOM).
+---
 
-## Tests
+## Repo contents
 
-Runs `sst-test-elements -p testsuite_default_quetz.py` (usermode + sysmode + PR1 checks).
+```
+quetz-docker/
+├── Dockerfile                  # Ubuntu 24.04 image: QEMU + SST + Quetz
+├── build-and-test.sh           # Build image + run full testsuite
+├── run-quetz-tests.sh          # In-container test driver (installed to /usr/local/bin)
+├── rebuild-quetz-usermode-gpu.sh  # Fast libquetz rebuild + GPU tests
+├── qemu-overlay/               # QEMU 9.2.1 MMIO bridge overlay
+│   ├── apply-qemu-overlay.sh
+│   ├── hw/misc/sst_mmio_bridge.c
+│   ├── quetz_ipc_client.c
+│   └── include/quetz/
+└── README.md                   # this file
+```
 
-### After editing Quetz C++ sources
+---
 
-The image ships a prebuilt `libquetz.so`. Live-mounting `sst-elements/` does **not** automatically rebuild it. Either:
+## Troubleshooting
 
-1. **Full refresh** (picks up `configure.m4` / `Makefile.am` changes): `./quetz-docker/build-and-test.sh`
-2. **Fast overlay** (C/C++ only, existing image) — see `rebuild-quetz-usermode-gpu.sh`
+**Build context error (`COPY sst-core: not found`)**  
+Run `docker build` from the **workspace root**, not from inside `quetz-docker/`:
 
-Build firmware once per mount: `RV64_CC=riscv64-linux-gnu-gcc ./tests/sysmode/firmware/build.sh` (inside the container).
+```bash
+cd ~/dev/quetz-workspace
+docker build -t raptor-quetz-test -f quetz-docker/Dockerfile .
+```
+
+**`sst-mmio-bridge: failed to attach shmem (errno=2)`**  
+The bridge opens the Quetz shared-memory segment by name. This requires a matching SST-side `expectedChildren=2` fix in `quetz_qemu_frontend.cc` (included in recent Quetz branches). Rebuild the image after pulling that change.
+
+**Tests pass in Docker but fail on a stale image**  
+Mounting `sst-elements/` does not rebuild `libquetz.so`. Run a full `./quetz-docker/build-and-test.sh` after C++ changes.
+
+**Out of memory during build**  
+The Dockerfile uses `make -j2`. If the build still OOMs, edit the Dockerfile temporarily to `-j1`.
+
+**Sysmode firmware build skipped**  
+The container includes `riscv64-linux-gnu-gcc`. If firmware binaries are missing, run the test script inside the container or build manually:
+
+```bash
+docker run --rm -it -v "$(pwd)/sst-elements:/src/sst-elements" raptor-quetz-test bash
+cd /src/sst-elements/src/sst/elements/quetz/tests/sysmode/firmware
+RV64_CC=riscv64-linux-gnu-gcc ./build.sh
+```
+
+---
+
+## Further reading
+
+- Quetz testing guide: `sst-elements/src/sst/elements/quetz/TESTING.md`
+- Quetz element overview: `sst-elements/src/sst/elements/quetz/QUETZ_OUTLINE.md`
