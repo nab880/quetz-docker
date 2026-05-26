@@ -101,6 +101,7 @@ RUN bash -lc "cd /src/sst-elements \
     && rm -f src/sst/elements/balar/.ignore \
     && rm -f src/sst/elements/shogun/.ignore \
     && rm -f src/sst/elements/merlin/.ignore \
+    && rm -f src/sst/elements/quetz/.ignore \
     && ./autogen.sh \
     && find /src/sst-elements/src/sst/elements/quetz -name '*.lo' -delete 2>/dev/null || true \
     && mkdir -p /build/sst-elements && cd /build/sst-elements \
