@@ -32,8 +32,11 @@ nvcc --version | head -1 || true
 echo "GPGPUSIM_ROOT=${GPGPUSIM_ROOT}"
 echo "GPU_ARCH=${GPU_ARCH}"
 
-echo "=== Balar element registration ==="
+echo "=== Element registration (balar + quetz when present) ==="
 sst-info balar 2>/dev/null | head -20 || true
+if [ -d /src/sst-elements/src/sst/elements/quetz ]; then
+    sst-info quetz 2>/dev/null | head -20 || true
+fi
 
 # Rebuild balar from the mounted sst-elements tree when present (dev iteration).
 if [ -d /build/sst-elements/src/sst/elements/balar ] && [ -d /src/sst-elements/src/sst/elements/balar ]; then
@@ -45,5 +48,11 @@ fi
 
 echo "=== Balar testsuite (smoke + integration) ==="
 "${SST_PREFIX}/bin/sst-test-elements" -p "${TESTSUITE}"
+
+# Combined-tree validation: run Quetz suite on the balar image when the element is mounted.
+if [ -d /src/sst-elements/src/sst/elements/quetz ] && [ -x /usr/local/bin/run-quetz-tests.sh ]; then
+    echo "=== Quetz testsuite on balar image (combined tree) ==="
+    /usr/local/bin/run-quetz-tests.sh
+fi
 
 echo "=== All Balar tests passed ==="
