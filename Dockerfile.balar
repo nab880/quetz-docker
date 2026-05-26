@@ -42,6 +42,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-blessings \
     python3-pip \
     python3-pygments \
+    python3-tomli \
     xutils-dev \
     zlib1g-dev \
     gcc-riscv64-linux-gnu \
@@ -71,6 +72,9 @@ RUN curl -fsSL "https://download.qemu.org/qemu-${QEMU_VERSION}.tar.xz" \
         || cp -a contrib/plugins/*.so "${QEMU_PREFIX}/lib/qemu/plugins/" 2>/dev/null \
         || true \
     && rm -rf "/tmp/qemu-${QEMU_VERSION}"
+
+RUN test -f "${QEMU_PREFIX}/include/qemu-plugin.h" \
+    && test -x "${QEMU_PREFIX}/bin/qemu-riscv64"
 
 ENV QEMU_PLUGIN_DIR="${QEMU_PREFIX}/lib/qemu/plugins"
 
