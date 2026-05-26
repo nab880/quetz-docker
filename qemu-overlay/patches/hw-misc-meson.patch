@@ -1,0 +1,7 @@
+--- a/hw/misc/meson.build
++++ b/hw/misc/meson.build
+@@ -1,3 +1,5 @@
++softmmu_ss.add(files('sst_mmio_bridge.c'))
++softmmu_ss.add(files('../../quetz_ipc_client.c'))
++
+ system_ss.add(when: 'CONFIG_APPLESMC', if_true: files('applesmc.c'))
