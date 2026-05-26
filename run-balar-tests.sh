@@ -39,28 +39,12 @@ echo "GPU_ARCH=${GPU_ARCH}"
 echo "=== Element registration (balar + quetz when present) ==="
 sst-info balar 2>/dev/null | head -20 || true
 
-rebuild_quetz_from_mount() {
-    local src="/src/sst-elements/src/sst/elements/quetz"
-    local bld="/build/sst-elements/src/sst/elements/quetz"
-    if [ ! -d "${src}" ] || [ ! -d /build/sst-elements/src/sst/elements ]; then
-        return 0
-    fi
-    echo "=== Rebuilding quetz from mounted sources ==="
-    mkdir -p "${bld}"
-    cp -a "${src}/." "${bld}/"
-    if [ -f "${bld}/Makefile" ]; then
-        make -j"$(nproc)" -C "${bld}" install || return 1
-        "${SST_PREFIX}/bin/sst-register" SST_ELEMENT_SOURCE quetz="${src}" || true
-        "${SST_PREFIX}/bin/sst-register" SST_ELEMENT_TESTS quetz="${src}/tests" || true
-    fi
-}
+echo "=== Element registration (balar + quetz when present) ==="
+sst-info balar 2>/dev/null | head -20 || true
+sst-info quetz 2>/dev/null | head -20 || true
 
-if [ -d /src/sst-elements/src/sst/elements/quetz ]; then
-    rebuild_quetz_from_mount || echo "WARN: quetz rebuild skipped or failed"
-    sst-info quetz 2>/dev/null | head -20 || true
-fi
-
-# Rebuild balar from the mounted sst-elements tree when present (dev iteration).
+# Quetz must be built into the image (Dockerfile.balar on quetz-gpu-balar-combined tree).
+# Do not rebuild from the mounted tree: copied Makefiles may embed host compiler paths.
 rebuild_balar_from_mount() {
     local src="/src/sst-elements/src/sst/elements/balar"
     local bld="/build/sst-elements/src/sst/elements/balar"
