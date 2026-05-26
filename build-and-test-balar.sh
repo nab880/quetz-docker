@@ -22,5 +22,6 @@ echo "=== Running Balar tests ==="
 docker run --rm --platform "${PLATFORM}" \
     -e "UPDATE_GOLD=${UPDATE_GOLD:-0}" \
     -v "${ROOT}/sst-elements:/src/sst-elements" \
+    -v "${ROOT}/quetz-docker/run-balar-tests.sh:/usr/local/bin/run-balar-tests.sh:ro" \
     "${IMAGE}" \
     /usr/local/bin/run-balar-tests.sh

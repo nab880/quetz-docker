@@ -61,12 +61,18 @@ if [ -d /src/sst-elements/src/sst/elements/quetz ]; then
 fi
 
 # Rebuild balar from the mounted sst-elements tree when present (dev iteration).
-if [ -d /build/sst-elements/src/sst/elements/balar ] && [ -d /src/sst-elements/src/sst/elements/balar ]; then
+rebuild_balar_from_mount() {
+    local src="/src/sst-elements/src/sst/elements/balar"
+    local bld="/build/sst-elements/src/sst/elements/balar"
+    if [ ! -d "${src}" ] || [ ! -d "${bld}" ]; then
+        return 0
+    fi
     echo "=== Rebuilding balar from mounted sources ==="
-    cp /src/sst-elements/src/sst/elements/balar/testcpu/quetzTestCPU.* \
-       /build/sst-elements/src/sst/elements/balar/testcpu/ 2>/dev/null || true
-    (cd /build/sst-elements/src/sst/elements/balar && make -j"$(nproc)" install) || true
-fi
+    cp -a "${src}/testcpu/." "${bld}/testcpu/"
+    make -j"$(nproc)" -C "${bld}" install
+}
+
+rebuild_balar_from_mount
 
 if [ "${UPDATE_GOLD:-0}" = "1" ]; then
     echo "=== UPDATE_GOLD=1: refresh vectorAdd stat gold after tests ==="

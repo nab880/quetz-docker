@@ -63,6 +63,9 @@ RUN curl -fsSL "https://download.qemu.org/qemu-${QEMU_VERSION}.tar.xz" \
     && make -j2 \
     && make -j2 plugins \
     && make install \
+    && mkdir -p "${QEMU_PREFIX}/include" \
+    && (test -f "${QEMU_PREFIX}/include/qemu-plugin.h" \
+        || cp include/plugins/qemu-plugin.h "${QEMU_PREFIX}/include/qemu-plugin.h") \
     && mkdir -p "${QEMU_PREFIX}/lib/qemu/plugins" \
     && cp -a build/contrib/plugins/*.so "${QEMU_PREFIX}/lib/qemu/plugins/" 2>/dev/null \
         || cp -a contrib/plugins/*.so "${QEMU_PREFIX}/lib/qemu/plugins/" 2>/dev/null \
