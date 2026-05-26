@@ -74,6 +74,7 @@ else
 fi
 
 echo "=== Quetz integration tests ==="
+cd "${QUETZ_DIR}/tests"
 "${SST_PREFIX}/bin/sst-test-elements" -p "${TESTSUITE}"
 
 if [ "${UPDATE_GOLD:-0}" = "1" ]; then
