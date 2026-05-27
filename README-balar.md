@@ -109,6 +109,17 @@ docker run --rm \
 
 For a lighter Quetz-only image (Ubuntu 24.04, no CUDA/GPGPU-Sim), use `./quetz-docker/build-and-test.sh` and `Dockerfile` instead.
 
+## GitHub Actions (linux/amd64)
+
+On **Apple Silicon**, item #2 is skipped locally (`SKIP_QUETZ_CROSSSTACK=1`). CI runs the full suite on native **ubuntu-latest**:
+
+- Workflow: [`.github/workflows/balar-docker.yml`](.github/workflows/balar-docker.yml)
+- **PRs to `main`:** checks out `sst-elements@balar-integration`
+- **`quetz-gpu-balar-combined`:** checks out `sst-elements@quetz-gpu-balar-combined` (includes Quetz cross-stack item #2)
+- Manual run: **Actions → Balar Docker tests → Run workflow** (optional `run_quetz_lightweight` for item #1)
+
+First CI run may take **2–3 hours** (image build + GPGPU-Sim). Re-runs benefit from Docker layer cache on the runner when available.
+
 ## Expected runtime
 
 - First image build: 30–90 minutes (GPGPU-Sim + QEMU + SST)

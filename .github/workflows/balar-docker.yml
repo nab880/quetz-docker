@@ -1,0 +1,98 @@
+# Build raptor-balar-test and run the full Balar + Quetz cross-stack suite on native
+# linux/amd64. Item #2 (Quetz tests inside the CUDA/GPGPU-Sim image) cannot run under
+# Docker Desktop Rosetta on Apple Silicon; this workflow is the supported CI path.
+
+name: Balar Docker tests
+
+on:
+  push:
+    branches: [main, quetz-gpu-balar-combined]
+  pull_request:
+    branches: [main, quetz-gpu-balar-combined]
+  workflow_dispatch:
+    inputs:
+      sst_elements_ref:
+        description: sst-elements branch or ref
+        required: false
+        default: balar-integration
+      sst_core_ref:
+        description: sst-core branch or ref
+        required: false
+        default: devel
+      run_quetz_lightweight:
+        description: Also run ./quetz-docker/build-and-test.sh (item #1)
+        type: boolean
+        default: false
+
+concurrency:
+  group: balar-docker-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  balar-docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+
+    steps:
+      - name: Resolve dependency refs
+        id: refs
+        run: |
+          if [ -n "${{ github.event.inputs.sst_elements_ref }}" ]; then
+            elements_ref="${{ github.event.inputs.sst_elements_ref }}"
+          elif [ "${{ github.ref_name }}" = "quetz-gpu-balar-combined" ] \
+            || [ "${{ github.base_ref }}" = "quetz-gpu-balar-combined" ]; then
+            elements_ref="quetz-gpu-balar-combined"
+          else
+            elements_ref="balar-integration"
+          fi
+
+          if [ -n "${{ github.event.inputs.sst_core_ref }}" ]; then
+            core_ref="${{ github.event.inputs.sst_core_ref }}"
+          else
+            core_ref="devel"
+          fi
+
+          echo "elements_ref=${elements_ref}" >> "${GITHUB_OUTPUT}"
+          echo "core_ref=${core_ref}" >> "${GITHUB_OUTPUT}"
+          echo "Using sst-elements@${elements_ref}, sst-core@${core_ref}"
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af || true
+          df -h
+
+      - name: Checkout quetz-docker
+        uses: actions/checkout@v4
+        with:
+          path: raptor-balar/quetz-docker
+
+      - name: Checkout sst-core
+        uses: actions/checkout@v4
+        with:
+          repository: sstsimulator/sst-core
+          ref: ${{ steps.refs.outputs.core_ref }}
+          path: raptor-balar/sst-core
+
+      - name: Checkout sst-elements
+        uses: actions/checkout@v4
+        with:
+          repository: nab880/sst-elements
+          ref: ${{ steps.refs.outputs.elements_ref }}
+          path: raptor-balar/sst-elements
+
+      - name: Build and run Balar Docker tests
+        working-directory: raptor-balar
+        env:
+          DOCKER_BUILDKIT: "1"
+        run: ./quetz-docker/build-and-test-balar.sh
+
+      - name: Run Quetz lightweight Docker tests (optional)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_quetz_lightweight == 'true'
+        working-directory: raptor-balar
+        env:
+          DOCKER_BUILDKIT: "1"
+        run: ./quetz-docker/build-and-test.sh
