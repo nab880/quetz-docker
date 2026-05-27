@@ -82,7 +82,10 @@ if [ "${SKIP_QUETZ_CROSSSTACK:-0}" = "1" ]; then
 elif [ -d /src/sst-elements/src/sst/elements/quetz ] && [ -x /usr/local/bin/run-quetz-tests.sh ]; then
     if sst-info quetz 2>/dev/null | grep -q QuetzComponent; then
         echo "=== Quetz testsuite on balar image (combined tree) ==="
-        if ! /usr/local/bin/run-quetz-tests.sh; then
+        # Prebuilt aarch64/x86_64 hello binaries have glibc-sensitive stats; the
+        # gold files come from the lightweight (Ubuntu 24.04) image. Skip them
+        # on this Ubuntu 22.04 amd64 image — item #1 covers them.
+        if ! QUETZ_SKIP_PREBUILT_USERMODE=1 /usr/local/bin/run-quetz-tests.sh; then
             QUETZ_RC=1
         fi
     else
