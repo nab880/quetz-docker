@@ -90,6 +90,20 @@ jobs:
           DOCKER_BUILDKIT: "1"
         run: ./quetz-docker/build-and-test-balar.sh
 
+      # Surface SST per-test stdout/stderr so doorbell/flush failures are
+      # debuggable without a local docker repro. sst-test-elements writes
+      # under sst_test_outputs/; the sysmode_balar template also writes
+      # quetz_sysmode_tests/<name>/<name>.out under that tree.
+      - name: Upload SST test outputs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sst-test-outputs
+          if-no-files-found: ignore
+          path: |
+            raptor-balar/sst-elements/src/sst/elements/quetz/tests/sst_test_outputs/**
+            raptor-balar/sst-elements/src/sst/elements/balar/tests/sst_test_outputs/**
+
       - name: Run Quetz lightweight Docker tests (optional)
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_quetz_lightweight == 'true'
         working-directory: raptor-balar
