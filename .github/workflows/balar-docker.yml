@@ -12,9 +12,10 @@ on:
   workflow_dispatch:
     inputs:
       sst_elements_ref:
-        description: sst-elements branch or ref
+        description: sst-elements branch or ref (empty = auto-resolve from the
+          triggering branch; quetz-gpu-balar-combined for the cross-stack tree)
         required: false
-        default: balar-integration
+        default: ""
       sst_core_ref:
         description: sst-core branch or ref
         required: false
