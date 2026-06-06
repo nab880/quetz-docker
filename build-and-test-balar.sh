@@ -20,7 +20,12 @@ docker build --platform "${PLATFORM}" -t "${IMAGE}" -f quetz-docker/Dockerfile.b
 
 echo "=== Running Balar tests ==="
 docker_env=(-e "UPDATE_GOLD=${UPDATE_GOLD:-0}")
+# Propagate the cross-stack expectation so run-balar-tests.sh hard-fails (rather
+# than false-greens) if the combined tree is expected but quetz sources are absent.
+docker_env+=(-e "QUETZ_CROSSSTACK_REQUIRED=${QUETZ_CROSSSTACK_REQUIRED:-0}")
 if [ "$(uname -s)" = "Darwin" ]; then
+    # Apple Silicon runs the amd64 image under Rosetta; usermode mmap fails. Skip
+    # the cross-stack here (item #2 is covered by native linux/amd64 CI).
     docker_env+=(-e "SKIP_QUETZ_CROSSSTACK=1")
 fi
 docker run --rm --platform "${PLATFORM}" \
