@@ -94,6 +94,12 @@ jobs:
       # debuggable without a local docker repro. sst-test-elements writes
       # under sst_test_outputs/; the sysmode_balar template also writes
       # quetz_sysmode_tests/<name>/<name>.out under that tree.
+      # The Docker container writes sst_test_outputs as root via the bind mount,
+      # so the runner cannot stat them (EACCES) when uploading. Relax perms first.
+      - name: Fix SST output permissions for upload
+        if: failure()
+        run: sudo chmod -R a+rX raptor-balar/sst-elements/src/sst/elements/*/tests/sst_test_outputs || true
+
       - name: Upload SST test outputs on failure
         if: failure()
         uses: actions/upload-artifact@v4
