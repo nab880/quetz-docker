@@ -8,7 +8,8 @@
  * recover the guest PC) + cpu_loop_exit (to resume), not by returning from the
  * host signal handler.
  *
- * Decoder: RV64 (base + RVC compressed). (Big-endian m68k follows.)
+ * Decoders: RV64 (base + RVC compressed) and big-endian m68k (Dn/An/immediate
+ * operands across the common EA modes).
  */
 
 #include "qemu/osdep.h"
@@ -149,6 +150,83 @@ static int decode_ldst(uint32_t insn, int *is_store, unsigned *size,
     return 0;
 }
 
+#elif defined(TARGET_M68K)
+/* Extension-word bytes that follow the MOVE opcode word for a memory EA. */
+static int m68k_ea_extlen(unsigned mode, unsigned reg)
+{
+    switch (mode) {
+    case 2: case 3: case 4: return 0;   /* (An), (An)+, -(An)        */
+    case 5: return 2;                   /* (d16,An)                  */
+    case 6: return 2;                   /* (d8,An,Xn) brief ext      */
+    case 7:
+        switch (reg) {
+        case 0: return 2;               /* (xxx).W                   */
+        case 1: return 4;               /* (xxx).L                   */
+        case 2: return 2;               /* (d16,PC)                  */
+        case 3: return 2;               /* (d8,PC,Xn)                */
+        default: return -1;
+        }
+    default: return -1;                 /* 0=Dn, 1=An: not memory    */
+    }
+}
+
+/*
+ * Decode an m68k MOVE.B/W/L whose memory operand is the faulting aperture
+ * access (what the compiler emits for `*(volatile T *)mmio`). The other operand
+ * is a data register (load or store) or an immediate (store of a constant, e.g.
+ * `move.l #&scratch,(a0)`). Big-endian; `op` is the opcode word. Returns total
+ * instruction length, sets *dreg (>=0 register, or -1 = immediate source whose
+ * value the caller reads from guest_pc+2). Returns 0 if not a handled form.
+ */
+static int decode_ldst(uint16_t op, int *is_store, unsigned *size, int *dreg)
+{
+    if ((op & 0xC000) != 0x0000) {
+        return 0; /* not the MOVE family (bits[15:14] != 00) */
+    }
+    unsigned imm_bytes;
+    switch ((op >> 12) & 0x3) {         /* MOVE size: 01=B, 11=W, 10=L */
+    case 1: *size = 1; imm_bytes = 2; break;   /* immediate .B occupies a word */
+    case 3: *size = 2; imm_bytes = 2; break;
+    case 2: *size = 4; imm_bytes = 4; break;
+    default: return 0;
+    }
+    unsigned dst_reg  = (op >> 9) & 0x7;
+    unsigned dst_mode = (op >> 6) & 0x7;
+    unsigned src_mode = (op >> 3) & 0x7;
+    unsigned src_reg  = op & 0x7;
+    int dst_is_mem = (dst_mode != 0 && dst_mode != 1);
+
+    /* The data operand is a data register (Dn, mode 0) or an address register
+     * (An, mode 1; MOVEA / move from An). *dreg encodes it: 0-7 = Dn,
+     * 8-15 = An, -1 = immediate source. */
+    if ((src_mode == 0 || src_mode == 1) && dst_is_mem) {
+        int ext = m68k_ea_extlen(dst_mode, dst_reg);   /* reg -> memory */
+        if (ext < 0) {
+            return 0;
+        }
+        *is_store = 1;
+        *dreg = (src_mode == 1) ? (int)(8 + src_reg) : (int)src_reg;
+        return 2 + ext;
+    }
+    if (src_mode == 7 && src_reg == 4 && dst_is_mem) {
+        int ext = m68k_ea_extlen(dst_mode, dst_reg);   /* #imm -> memory */
+        if (ext < 0) {
+            return 0;
+        }
+        /* source immediate precedes the destination EA extension words */
+        *is_store = 1; *dreg = -1; return 2 + (int)imm_bytes + ext;
+    }
+    if (dst_mode == 0 || dst_mode == 1) {
+        int ext = m68k_ea_extlen(src_mode, src_reg);   /* memory -> reg */
+        if (ext < 0) {
+            return 0;
+        }
+        *is_store = 0;
+        *dreg = (dst_mode == 1) ? (int)(8 + dst_reg) : (int)dst_reg;
+        return 2 + ext;
+    }
+    return 0;
+}
 #endif
 
 /*
@@ -213,6 +291,57 @@ void sst_mmio_handle_fault(CPUState *cpu, abi_ptr guest_addr, uintptr_t host_pc)
         }
         if (rd != 0) {
             env->gpr[rd] = val;
+        }
+    }
+    env->pc = guest_pc + len;
+    sst_mmio_resume(cpu); /* does not return */
+
+#elif defined(TARGET_M68K)
+    CPUM68KState *env = cpu_env(cpu);
+    target_ulong guest_pc = env->pc;
+
+    uint16_t op = 0;
+    if (get_user_u16(op, guest_pc) != 0) {
+        return;
+    }
+    int is_store = 0, dreg = 0, len;
+    unsigned size = 0;
+    len = decode_ldst(op, &is_store, &size, &dreg);
+    if (!len) {
+        return;
+    }
+
+    uint32_t mask = (size >= 4) ? 0xFFFFFFFFu : ((1u << (size * 8)) - 1u);
+    if (is_store) {
+        uint32_t raw;
+        if (dreg < 0) {
+            /* immediate source: word for .B/.W (byte in low 8), long for .L */
+            if (size >= 4) {
+                if (get_user_u32(raw, guest_pc + 2) != 0) {
+                    return;
+                }
+            } else {
+                uint16_t w = 0;
+                if (get_user_u16(w, guest_pc + 2) != 0) {
+                    return;
+                }
+                raw = w;
+            }
+        } else if (dreg < 8) {
+            raw = env->dregs[dreg];
+        } else {
+            raw = env->aregs[dreg - 8];
+        }
+        quetz_ipc_mmio_write(ipc_client, r->vcpu_id, guest_addr, size, raw & mask);
+    } else {
+        uint64_t val = quetz_ipc_mmio_read(ipc_client, r->vcpu_id,
+                                           guest_addr, size);
+        if (dreg < 8) {
+            env->dregs[dreg] = (env->dregs[dreg] & ~mask) | ((uint32_t)val & mask);
+        } else {
+            /* MOVEA: .W sign-extends to 32 bits, .L is the full value. */
+            env->aregs[dreg - 8] = (size == 2)
+                ? (uint32_t)(int32_t)(int16_t)val : (uint32_t)val;
         }
     }
     env->pc = guest_pc + len;
