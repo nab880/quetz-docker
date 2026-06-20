@@ -28,4 +28,68 @@ fi
 # Mark device user-creatable through default Kconfig (sst-mmio-bridge is built
 # unconditionally; no Kconfig symbol needed).
 
+# --- linux-user (P6): SIGSEGV-trap synchronous MMIO --------------------------
+# System mode traps the doorbell with the sst-mmio-bridge device; user mode has
+# no device map, so qemu-<arch> reserves the aperture PROT_NONE and routes the
+# resulting SIGSEGV to the same sync mailbox. Edits are anchor-based + idempotent
+# so they tolerate QEMU point releases (developed against 9.2.1).
+if [ -d "$QEMU_SRC/linux-user" ]; then
+    cp "$OVERLAY/linux-user/sst_mmio.c" "$QEMU_SRC/linux-user/sst_mmio.c"
+    cp "$OVERLAY/linux-user/sst_mmio.h" "$QEMU_SRC/linux-user/sst_mmio.h"
+
+    QEMU_SRC="$QEMU_SRC" python3 - <<'PY'
+import os
+src = os.environ["QEMU_SRC"]
+q = chr(39)
+
+def patch(path, edits):
+    p = os.path.join(src, path)
+    s = open(p).read()
+    for marker, anchor, ins, after in edits:
+        if marker in s:
+            continue
+        assert anchor in s, "anchor missing in %s: %r" % (path, anchor)
+        s = s.replace(anchor, (anchor + ins) if after else (ins + anchor), 1)
+    open(p, "w").write(s)
+
+# linux-user/meson.build: compile sst_mmio.c + ipc client into every target
+# (linux_user_ss is built per-target; sst_mmio.c is internally TARGET_*-guarded).
+patch("linux-user/meson.build", [(
+    "sst_mmio.c",
+    "linux_user_ss.add(rt)\n",
+    "\n# Quetz user-mode synchronous MMIO (P6)\n"
+    "linux_user_ss.add(files(" + q + "sst_mmio.c" + q + "))\n"
+    "linux_user_ss.add(files(" + q + "../hw/misc/quetz_ipc_client.c" + q + "))\n",
+    True)])
+
+# linux-user/main.c: include, arg handler, arg_table entry, aperture reservation.
+patch("linux-user/main.c", [
+    ("sst_mmio.h", '#include "qemu.h"\n', '#include "sst_mmio.h"\n', True),
+    ("handle_arg_sst_mmio_range",
+     "static const struct qemu_argument arg_table[] = {\n",
+     "static void handle_arg_sst_mmio_range(const char *arg)\n"
+     "{\n    sst_mmio_register_range(arg);\n}\n\n", False),
+    ("QEMU_SST_MMIO_RANGE",
+     "    {NULL, NULL, false, NULL, NULL, NULL}\n};",
+     '    {"sst-mmio-range", "QEMU_SST_MMIO_RANGE", true, handle_arg_sst_mmio_range,\n'
+     '     "spec",       "Quetz sync MMIO range shmname=,base=,size= (repeatable)"},\n',
+     False),
+    ("sst_mmio_apply_reservation", "    cpu_loop(env);\n",
+     "    sst_mmio_apply_reservation();\n", False),
+])
+
+# linux-user/signal.c: include + the host_sigsegv_handler hook.
+patch("linux-user/signal.c", [
+    ("sst_mmio.h", '#include "host-signal.h"\n', '#include "sst_mmio.h"\n', True),
+    ("sst_mmio_handle_fault",
+     "    MMUAccessType access_type = adjust_signal_pc(&pc, is_write);\n"
+     "    bool maperr;\n",
+     "\n    /* Quetz P6: route reserved-aperture faults to the sync mailbox.\n"
+     "     * On a match this does not return (cpu_loop_exit). */\n"
+     "    sst_mmio_handle_fault(cpu, guest_addr, pc);\n", True),
+])
+print("linux-user overlay applied")
+PY
+fi
+
 echo "Quetz QEMU overlay applied under $QEMU_SRC"

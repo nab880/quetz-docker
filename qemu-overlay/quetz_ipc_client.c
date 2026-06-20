@@ -3,10 +3,13 @@
 #include "quetz/quetz_ipc_types.h"
 
 #include <fcntl.h>
+#include <linux/futex.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
+#include <time.h>
 #include <unistd.h>
 
 struct QuetzInternalSharedData {
@@ -87,8 +90,15 @@ static void clear_slot(QuetzSharedData *sd, unsigned vcpu)
 
 static void wait_slot(QuetzSharedData *sd, unsigned vcpu, uint64_t *out)
 {
-    while (sd->mmio_slot[vcpu].ready == 0)
-        __sync_synchronize();
+    /* Block (rather than busy-spin) until SST posts the response, so an offload
+     * that stalls the vCPU doesn't burn a host core. FUTEX_WAIT returns at once
+     * if ready != 0; the 1ms timeout is a safety re-poll so a missed wake
+     * self-heals instead of hanging. The futex word lives in cross-process shmem. */
+    uint32_t *ready = (uint32_t *)&sd->mmio_slot[vcpu].ready;
+    while (*ready == 0) {
+        struct timespec ts = { 0, 1000000 };
+        syscall(SYS_futex, ready, FUTEX_WAIT, 0, &ts, NULL, 0);
+    }
     *out = sd->mmio_slot[vcpu].value;
     sd->mmio_slot[vcpu].ready = 0;
     __sync_synchronize();

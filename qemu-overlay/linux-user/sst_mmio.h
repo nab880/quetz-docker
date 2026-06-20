@@ -1,7 +1,9 @@
 #ifndef SST_MMIO_H
 #define SST_MMIO_H
 
-#include <stdint.h>
+#include "qemu/osdep.h"
+#include "exec/cpu_ldst.h"
+#include "hw/core/cpu.h"
 
 struct SstMmioRange {
     char     shmname[256];
@@ -10,9 +12,13 @@ struct SstMmioRange {
     unsigned vcpu_id;
 };
 
+/* Parse one -sst-mmio-range SPEC (shmname=,base=,size=,vcpu_id=). Repeatable. */
 void sst_mmio_register_range(const char *spec);
-void sst_mmio_apply_mprotect(void);
-int  sst_mmio_handle_fault(uint64_t guest_addr, void *cpu_env,
-                           uint64_t guest_pc);
+
+/* Reserve registered apertures as PROT_NONE; call once after guest_base setup. */
+void sst_mmio_apply_reservation(void);
+
+/* SIGSEGV hook: services an aperture fault and resumes (no return), else returns. */
+void sst_mmio_handle_fault(CPUState *cpu, abi_ptr guest_addr, uintptr_t host_pc);
 
 #endif

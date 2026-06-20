@@ -12,9 +12,10 @@ on:
   workflow_dispatch:
     inputs:
       sst_elements_ref:
-        description: sst-elements branch or ref
+        description: sst-elements branch or ref (empty = auto-resolve from the
+          triggering branch; quetz-gpu-balar-combined for the cross-stack tree)
         required: false
-        default: balar-integration
+        default: ""
       sst_core_ref:
         description: sst-core branch or ref
         required: false
@@ -52,9 +53,19 @@ jobs:
             core_ref="devel"
           fi
 
+          # The combined tree must run the Quetz cross-stack suite; mark it
+          # required so a misconfigured checkout (e.g. balar-integration, which
+          # has no quetz element) hard-fails instead of silently passing.
+          if [ "${elements_ref}" = "quetz-gpu-balar-combined" ]; then
+            crossstack_required=1
+          else
+            crossstack_required=0
+          fi
+
           echo "elements_ref=${elements_ref}" >> "${GITHUB_OUTPUT}"
           echo "core_ref=${core_ref}" >> "${GITHUB_OUTPUT}"
-          echo "Using sst-elements@${elements_ref}, sst-core@${core_ref}"
+          echo "crossstack_required=${crossstack_required}" >> "${GITHUB_OUTPUT}"
+          echo "Using sst-elements@${elements_ref}, sst-core@${core_ref} (cross-stack required=${crossstack_required})"
 
       - name: Free disk space
         run: |
@@ -88,7 +99,28 @@ jobs:
         working-directory: raptor-balar
         env:
           DOCKER_BUILDKIT: "1"
+          QUETZ_CROSSSTACK_REQUIRED: ${{ steps.refs.outputs.crossstack_required }}
         run: ./quetz-docker/build-and-test-balar.sh
+
+      # Surface SST per-test stdout/stderr so doorbell/flush failures are
+      # debuggable without a local docker repro. sst-test-elements writes
+      # under sst_test_outputs/; the sysmode_balar template also writes
+      # quetz_sysmode_tests/<name>/<name>.out under that tree.
+      # The Docker container writes sst_test_outputs as root via the bind mount,
+      # so the runner cannot stat them (EACCES) when uploading. Relax perms first.
+      - name: Fix SST output permissions for upload
+        if: failure()
+        run: sudo chmod -R a+rX raptor-balar/sst-elements/src/sst/elements/*/tests/sst_test_outputs || true
+
+      - name: Upload SST test outputs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sst-test-outputs
+          if-no-files-found: ignore
+          path: |
+            raptor-balar/sst-elements/src/sst/elements/quetz/tests/sst_test_outputs/**
+            raptor-balar/sst-elements/src/sst/elements/balar/tests/sst_test_outputs/**
 
       - name: Run Quetz lightweight Docker tests (optional)
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.run_quetz_lightweight == 'true'

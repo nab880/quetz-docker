@@ -56,7 +56,22 @@ rebuild_balar_from_mount() {
     make -j"$(nproc)" -C "${bld}" install
 }
 
+build_balar_vectoradd() {
+    local trace_dir="/src/sst-elements/src/sst/elements/balar/tests/balar_trace"
+    if [ ! -d "${trace_dir}" ]; then
+        return 0
+    fi
+    if [ -x "${trace_dir}/vectorAdd" ]; then
+        return 0
+    fi
+    echo "=== Building balar_trace vectorAdd (GPGPU-Sim CUDA binary) ==="
+    if ! make -C "${trace_dir}" vectorAdd; then
+        echo "WARN: vectorAdd build failed — sysmode_balar tests may skip"
+    fi
+}
+
 rebuild_balar_from_mount
+build_balar_vectoradd
 
 if [ "${UPDATE_GOLD:-0}" = "1" ]; then
     echo "=== UPDATE_GOLD=1: refresh vectorAdd stat gold after tests ==="
@@ -77,22 +92,67 @@ fi
 # Combined-tree validation: run Quetz suite on the balar image when the element is built.
 # Item #2 requires native linux/amd64 (GPGPU-Sim image is amd64-only). On macOS hosts,
 # Docker runs that image under Rosetta and Quetz usermode tests fail mmap ("rosetta error").
+# Cross-stack guard diagnostics: a silently-skipped cross-stack is a false green
+# (the doorbell/sysmode_balar tests never run). Log exactly what we see.
+QUETZ_SRC_DIR="/src/sst-elements/src/sst/elements/quetz"
+QUETZ_RUNNER="/usr/local/bin/run-quetz-tests.sh"
+# QUETZ_CROSSSTACK_REQUIRED=1 means "this image is the combined tree and the
+# cross-stack MUST run"; a skip is then a hard failure rather than a false green.
+# It is intentionally 0 for balar-only checkouts (e.g. balar-integration) and
+# for SKIP_QUETZ_CROSSSTACK (Apple Silicon/Rosetta) runs.
+QUETZ_REQUIRED="${QUETZ_CROSSSTACK_REQUIRED:-0}"
+CROSSSTACK_STATUS="not-run"
+echo "=== Cross-stack guard ==="
+echo "  SKIP_QUETZ_CROSSSTACK=${SKIP_QUETZ_CROSSSTACK:-0}"
+echo "  QUETZ_CROSSSTACK_REQUIRED=${QUETZ_REQUIRED}"
+echo "  quetz sources dir: $( [ -d "${QUETZ_SRC_DIR}" ] && echo present || echo MISSING ) (${QUETZ_SRC_DIR})"
+ls -l "${QUETZ_RUNNER}" 2>&1 || echo "  run-quetz-tests.sh: MISSING (${QUETZ_RUNNER})"
+
 if [ "${SKIP_QUETZ_CROSSSTACK:-0}" = "1" ]; then
     echo "NOTE: SKIP_QUETZ_CROSSSTACK=1 — skip Quetz-on-balar-image (item #2); use native linux/amd64 CI"
-elif [ -d /src/sst-elements/src/sst/elements/quetz ] && [ -x /usr/local/bin/run-quetz-tests.sh ]; then
-    if sst-info quetz 2>/dev/null | grep -q QuetzComponent; then
+    CROSSSTACK_STATUS="skipped (SKIP_QUETZ_CROSSSTACK=1)"
+elif [ -d "${QUETZ_SRC_DIR}" ]; then
+    # Invoke via `bash` rather than requiring the executable bit: actions/checkout
+    # and bind mounts do not always preserve +x, which previously caused the whole
+    # cross-stack suite to be silently skipped while CI still went green.
+    # Capture sst-info to a var first; piping into `grep -q` can trip pipefail
+    # via SIGPIPE on sst-info when grep closes the pipe early.
+    QUETZ_INFO="$(sst-info quetz 2>/dev/null || true)"
+    if [ ! -f "${QUETZ_RUNNER}" ]; then
+        echo "ERROR: quetz sources present but ${QUETZ_RUNNER} is missing — cannot run cross-stack"
+        QUETZ_RC=1
+        CROSSSTACK_STATUS="FAILED (runner missing)"
+    elif printf '%s' "${QUETZ_INFO}" | grep -q QuetzComponent; then
         echo "=== Quetz testsuite on balar image (combined tree) ==="
         # Prebuilt aarch64/x86_64 hello binaries have glibc-sensitive stats; the
         # gold files come from the lightweight (Ubuntu 24.04) image. Skip them
         # on this Ubuntu 22.04 amd64 image — item #1 covers them.
-        if ! QUETZ_SKIP_PREBUILT_USERMODE=1 /usr/local/bin/run-quetz-tests.sh; then
+        # Also skip stat gold on cross-stack: Round 2 IPC/stats drift vs the
+        # lightweight gold baseline; behavioral checks (incl. sysmode_balar) still run.
+        if QUETZ_SKIP_PREBUILT_USERMODE=1 QUETZ_SKIP_GOLD=1 bash "${QUETZ_RUNNER}"; then
+            CROSSSTACK_STATUS="ran (passed)"
+        else
             QUETZ_RC=1
+            CROSSSTACK_STATUS="ran (FAILED)"
         fi
     else
-        echo "NOTE: quetz sources mounted but element not registered — skip cross-stack Quetz suite"
-        echo "      Rebuild raptor-balar-test with quetz present (quetz-gpu-balar-combined tree)"
+        echo "ERROR: quetz sources present but element not registered — cross-stack cannot run"
+        echo "       Rebuild raptor-balar-test with quetz present (quetz-gpu-balar-combined tree)"
+        QUETZ_RC=1
+        CROSSSTACK_STATUS="FAILED (element not registered)"
     fi
+elif [ "${QUETZ_REQUIRED}" = "1" ]; then
+    echo "ERROR: cross-stack is required (QUETZ_CROSSSTACK_REQUIRED=1) but quetz sources"
+    echo "       are MISSING at ${QUETZ_SRC_DIR}. The checked-out sst-elements is almost"
+    echo "       certainly the wrong branch (need quetz-gpu-balar-combined, not balar-integration)."
+    QUETZ_RC=1
+    CROSSSTACK_STATUS="FAILED (sources missing while required)"
+else
+    echo "NOTE: quetz sources not present and not required — skipping cross-stack Quetz suite"
+    CROSSSTACK_STATUS="skipped (sources not present)"
 fi
+
+echo "=== Result summary: balar_rc=${BALAR_RC} quetz_rc=${QUETZ_RC} cross_stack=${CROSSSTACK_STATUS} ==="
 
 if [ "${BALAR_RC}" -ne 0 ] || [ "${QUETZ_RC}" -ne 0 ]; then
     echo "=== Balar/Quetz validation FAILED (balar=${BALAR_RC} quetz=${QUETZ_RC}) ==="
