@@ -45,6 +45,7 @@ if command -v riscv64-linux-gnu-gcc >/dev/null 2>&1; then
         cd "${FW_DIR}"
         for fw in riscv_virt_hello riscv_virt_uart_echo riscv_virt_mmio_poke \
                   riscv_virt_gpu_trace riscv_virt_gpu_kernel \
+                  riscv_virt_gpu_fft \
                   riscv_virt_balar_kernel; do
             if [ -f "${fw}.c" ]; then
                 echo "  building ${fw}..."
