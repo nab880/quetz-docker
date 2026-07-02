@@ -45,7 +45,7 @@ if command -v riscv64-linux-gnu-gcc >/dev/null 2>&1; then
         cd "${FW_DIR}"
         for fw in riscv_virt_hello riscv_virt_uart_echo riscv_virt_mmio_poke \
                   riscv_virt_gpu_trace riscv_virt_gpu_kernel \
-                  riscv_virt_gpu_fft \
+                  riscv_virt_gpu_fft riscv_virt_gpu_fft_offload \
                   riscv_virt_balar_kernel; do
             if [ -f "${fw}.c" ]; then
                 echo "  building ${fw}..."
@@ -56,6 +56,30 @@ if command -v riscv64-linux-gnu-gcc >/dev/null 2>&1; then
     )
 else
     echo "NOTE: riscv64-linux-gnu-gcc not found — skipping sysmode firmware build"
+fi
+
+echo "=== Building sysmode ColdFire (m68k) firmware ==="
+if command -v m68k-linux-gnu-gcc >/dev/null 2>&1; then
+    FW_DIR="${QUETZ_DIR}/tests/sysmode/firmware"
+    export M68K_CC="${M68K_CC:-m68k-linux-gnu-gcc}"
+    # NXP ColdFire MCF5208 (big-endian m68k), QEMU mcf5208evb. Matches build.sh.
+    M68K_FLAGS="-mcpu=5208 -O2 -nostdlib -nostartfiles -ffreestanding \
+      -T link_m68k.ld -Wl,--build-id=none"
+    (
+        cd "${FW_DIR}"
+        # Device-computed FFT (kernel_type=fft): no float/fixed-point math on the
+        # guest (raw u32 bit-pattern compares), so plain M68K_FLAGS.
+        echo "  building coldfire_gpu_fft_offload..."
+        ${M68K_CC} ${M68K_FLAGS} coldfire_startup.S coldfire_gpu_fft_offload.c \
+            -o coldfire_gpu_fft_offload || echo "WARN: coldfire_gpu_fft_offload build failed"
+        # CPU-compute contrast (Q16.16 fixed point; firmware ships its own __muldi3,
+        # so no -lgcc — the m68k libgcc soft-float helpers hang on ColdFire V2).
+        echo "  building coldfire_gpu_fft..."
+        ${M68K_CC} ${M68K_FLAGS} -DFFT_FIXED_POINT coldfire_startup.S coldfire_gpu_fft.c \
+            -o coldfire_gpu_fft || echo "WARN: coldfire_gpu_fft build failed"
+    )
+else
+    echo "NOTE: m68k-linux-gnu-gcc not found — skipping ColdFire firmware build"
 fi
 
 echo "=== Building microbenchmark ELFs (optional) ==="

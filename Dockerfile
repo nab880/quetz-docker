@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     ca-certificates \
     curl \
+    doctest-dev \
     flex \
     git \
     libcap-ng-dev \
@@ -41,6 +42,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zlib1g-dev \
     gcc-riscv64-linux-gnu \
     libc6-dev-riscv64-cross \
+    gcc-m68k-linux-gnu \
     && rm -rf /var/lib/apt/lists/*
 
 # Ubuntu/Fedora packages do not ship qemu-plugin.h — build QEMU 9.2 with plugins.
@@ -53,7 +55,7 @@ RUN curl -fsSL "https://download.qemu.org/qemu-${QEMU_VERSION}.tar.xz" \
     && sh /docker/qemu-overlay/apply-qemu-overlay.sh "/tmp/qemu-${QEMU_VERSION}" \
     && ./configure \
          --prefix="${QEMU_PREFIX}" \
-         --target-list=riscv64-softmmu,aarch64-softmmu,arm-softmmu,i386-softmmu,riscv64-linux-user,aarch64-linux-user,x86_64-linux-user \
+         --target-list=riscv64-softmmu,aarch64-softmmu,arm-softmmu,i386-softmmu,m68k-softmmu,riscv64-linux-user,aarch64-linux-user,x86_64-linux-user \
          --enable-plugins \
     && make -j2 \
     && make -j2 plugins \
@@ -77,7 +79,8 @@ RUN mkdir -p "${SST_PREFIX}/bin" "${SST_PREFIX}/lib" "${SST_PREFIX}/libexec" \
     && ln -sf "${QEMU_PREFIX}/bin/qemu-system-riscv64" "${SST_PREFIX}/bin/qemu-system-riscv64" \
     && ln -sf "${QEMU_PREFIX}/bin/qemu-system-aarch64" "${SST_PREFIX}/bin/qemu-system-aarch64" \
     && ln -sf "${QEMU_PREFIX}/bin/qemu-system-i386"    "${SST_PREFIX}/bin/qemu-system-i386" \
-    && ln -sf "${QEMU_PREFIX}/bin/qemu-system-arm"     "${SST_PREFIX}/bin/qemu-system-arm"
+    && ln -sf "${QEMU_PREFIX}/bin/qemu-system-arm"     "${SST_PREFIX}/bin/qemu-system-arm" \
+    && ln -sf "${QEMU_PREFIX}/bin/qemu-system-m68k"    "${SST_PREFIX}/bin/qemu-system-m68k"
 
 WORKDIR /src
 
