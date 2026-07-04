@@ -11,10 +11,33 @@ Use it to build and run the Quetz regression suite without installing SST or QEM
 
 **Balar + GPGPU-Sim** tests use a separate CUDA-based image — see [README-balar.md](README-balar.md) and `./quetz-docker/build-and-test-balar.sh`.
 
-| Script | Image | Tests |
+| Script | Image | Purpose |
 |--------|-------|-------|
-| `./quetz-docker/build-and-test.sh` | `raptor-quetz-test` (`Dockerfile`) | Quetz testsuite (no CUDA) |
+| `./quetz-docker/build-and-test.sh` | `raptor-quetz-test` (`Dockerfile`, `--target build`) | Quetz testsuite (no CUDA) |
 | `./quetz-docker/build-and-test-balar.sh` | `raptor-balar-test` (`Dockerfile.balar`) | Balar / GPGPU-Sim + QuetzTestCPU contract tests |
+| `./quetz-docker/quetz-run` | `quetz-sim` (`Dockerfile`, `--target runtime`) | **Run your own simulation** — see below |
+
+## Running your own simulation (`quetz-run`)
+
+The `runtime` image target is the user-facing product: the sim + patched QEMU
++ m68k/riscv cross compilers, no build system. `quetz-run` wraps it with an
+artifacts + exit-code contract (0 = guest PASS sentinel, 2 = FAIL,
+1 = error/timeout):
+
+```bash
+docker build --target runtime -t quetz-sim -f quetz-docker/Dockerfile .
+./quetz-docker/quetz-run --out artifacts/          # shipped ColdFire demo
+./quetz-docker/quetz-run --firmware my_app.elf --stdin my_gps.nmea \
+                         --sensor my_stream.bin --out artifacts/
+```
+
+Artifacts: `transcript.txt` (guest serial), `stats.csv`, `sst.log`,
+`result.txt`. Own deck: start from
+`sst-elements/src/sst/elements/quetz/tests/sysmode/template_system.py`.
+Fixture tooling lives in `sst-elements/.../quetz/tools/`. Full walkthrough:
+`SIMULATING-YOUR-SYSTEM.md` in the element. **Images bake the element at
+build time — rebuild `quetz-sim` after changing element code** (the test
+image instead rebuilds from the `/src` mount at test time).
 
 ---
 
@@ -186,19 +209,52 @@ Environment variables set in the container:
 
 ---
 
-## QEMU overlay
+## QEMU overlay (pinned)
 
-The `qemu-overlay/` directory is applied to upstream QEMU 9.2.1 during the Docker build (`apply-qemu-overlay.sh`). It adds:
+**Base: upstream QEMU 9.2.1** (fetched from download.qemu.org in the
+Dockerfile; `ARG QEMU_VERSION` pins it). The `qemu-overlay/` directory is
+applied by `apply-qemu-overlay.sh` — it fails loudly if any piece does not
+apply, so a QEMU version bump cannot silently drop the overlay.
+
+Copied sources:
 
 | Component | Purpose |
 |-----------|---------|
-| `hw/misc/sst_mmio_bridge.c` | Sysmode `-device sst-mmio-bridge` — guest MMIO loads/stores block until SST responds |
-| `quetz_ipc_client.c` | Standalone shared-memory IPC client (no SST dependency) |
-| `include/quetz/quetz_ipc_types.h` | C mirror of Quetz IPC layout |
+| `hw/misc/sst_mmio_bridge.c` | Sysmode `-device sst-mmio-bridge` — guest MMIO loads/stores block until SST responds; with `irq-count=N` also polls the reverse IRQ mailbox on a virtual-time timer and drives interrupt-controller GPIO inputs (SST-device IRQ injection) |
+| `quetz_ipc_client.c` | Standalone shared-memory IPC client (no SST dependency); includes the seqlock IRQ-slot drain (`quetz_ipc_irq_drain`) |
+| `include/quetz/quetz_ipc_{client,types}.h` | C mirror of the Quetz IPC layout (mailbox + per-(vcore, line) IRQ slots) |
+| `linux-user/sst_mmio.{c,h}` | Usermode (P6): PROT_NONE aperture + SIGSEGV routing to the same sync mailbox |
 
-The Quetz launcher passes `-device sst-mmio-bridge,shmname=...,base=...,size=...` when `QUETZ_MMIO_PAYLOAD=1` is set (sysmode only). See `sst-elements` Quetz docs for MMIO payload delivery details.
+Patches (`qemu-overlay/patches/`, ordered), plus anchor-based idempotent
+edits made directly by `apply-qemu-overlay.sh`:
 
-Linux-user SIGSEGV hook sources under `qemu-overlay/linux-user/` are included for future work but are **not** wired into the current overlay script.
+| Patch | Touches |
+|-------|---------|
+| `hw-misc-meson.patch` | registers the bridge sources with the softmmu build |
+| `linux-user-meson.patch` | registers the usermode sources |
+| `linux-user-main.patch` | `-sst-mmio-range` command-line option |
+| `linux-user-signal.patch` | SIGSEGV hook for the usermode aperture |
+| `qemu-options.def.patch` | option table entry |
+| (inline edit) `hw/m68k/mcf_intc.c` | exposes the 64 INTC inputs as qdev GPIOs so the bridge can inject IRQs by line number |
+| (inline edits) `linux-user/{meson.build,main.c,signal.c}` | usermode wiring for the pieces above |
+
+Consumers: the Quetz launcher passes
+`-device sst-mmio-bridge,shmname=...,base=...,size=...` (sysmode) or
+`-sst-mmio-range ...` (usermode) when `QUETZ_MMIO_PAYLOAD=1`, and appends
+`,irq-count=N[,irq-poll-ns=...][,intc-type=...]` to the sysmode bridge when
+`QUETZ_IRQ_LINES` is set (SST-device IRQ injection; `intc-type` defaults to
+`mcf-intc`).
+
+**Rebuild procedure** (e.g. after editing the overlay or bumping
+`QEMU_VERSION`): the QEMU build is one cached Docker layer — rerun
+`docker build --target build ...` and it rebuilds automatically when the
+overlay directory or version ARG changes. The shared-memory ABI the bridge
+compiles against is exported by the element
+(`$SST_PREFIX/include/sst/elements/quetz/quetz_ipc_types.h`); keep the
+overlay's copy in sync when the IPC structs change.
+
+Long-term option: upstream `sst-mmio-bridge` to QEMU to retire the fork —
+this pinning doc is the prerequisite inventory for that conversation.
 
 ---
 

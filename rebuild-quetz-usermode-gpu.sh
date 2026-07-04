@@ -8,7 +8,7 @@ IMAGE="${RAPTOR_QUETZ_IMAGE:-raptor-quetz-test}"
 QUETZ_MOUNT="${ROOT}/sst-elements/src/sst/elements/quetz"
 
 if ! docker image inspect "${IMAGE}" >/dev/null 2>&1; then
-    echo "Image ${IMAGE} not found; run: docker build -t ${IMAGE} -f quetz-docker/Dockerfile ."
+    echo "Image ${IMAGE} not found; run: docker build --target build -t ${IMAGE} -f quetz-docker/Dockerfile ."
     exit 1
 fi
 

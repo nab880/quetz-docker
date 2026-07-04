@@ -28,6 +28,33 @@ fi
 # Mark device user-creatable through default Kconfig (sst-mmio-bridge is built
 # unconditionally; no Kconfig symbol needed).
 
+# --- hw/m68k/mcf_intc.c: expose the 64 interrupt inputs as qdev GPIOs -------
+# The mcf5208evb machine wires its devices through qemu_allocate_irqs() and
+# frees the array, so a foreign device (sst-mmio-bridge IRQ injection) has no
+# path to the controller inputs. Registering them as qdev GPIO inputs makes
+# them addressable via qdev_get_gpio_in(dev, line); mcf_intc_set_irq already
+# has the qemu_irq_handler signature and casts its opaque from the device
+# pointer, which is what qdev GPIOs pass. Anchor-based + idempotent, like the
+# linux-user edits below.
+if [ -f "$QEMU_SRC/hw/m68k/mcf_intc.c" ]; then
+    QEMU_SRC="$QEMU_SRC" python3 - <<'PY'
+import os
+src = os.environ["QEMU_SRC"]
+p = os.path.join(src, "hw/m68k/mcf_intc.c")
+s = open(p).read()
+if "qdev_init_gpio_in" not in s:
+    anchor = ('    memory_region_init_io(&s->iomem, obj, &mcf_intc_ops, s,'
+              ' "mcf", 0x100);\n')
+    assert anchor in s, "anchor missing in hw/m68k/mcf_intc.c"
+    ins = ("    /* Quetz overlay: expose the 64 interrupt inputs as qdev GPIOs\n"
+           "     * so sst-mmio-bridge can inject SST-device IRQs by line. */\n"
+           "    qdev_init_gpio_in(DEVICE(obj), mcf_intc_set_irq, 64);\n")
+    s = s.replace(anchor, anchor + ins, 1)
+    open(p, "w").write(s)
+print("mcf_intc qdev GPIO overlay applied")
+PY
+fi
+
 # --- linux-user (P6): SIGSEGV-trap synchronous MMIO --------------------------
 # System mode traps the doorbell with the sst-mmio-bridge device; user mode has
 # no device map, so qemu-<arch> reserves the aperture PROT_NONE and routes the

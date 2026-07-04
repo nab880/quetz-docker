@@ -24,6 +24,8 @@ struct QuetzIpcClient {
     void             *map;
     size_t            map_size;
     QuetzSharedData  *shared;
+    /* Per-slot seq shadow for quetz_ipc_irq_drain (slots start at seq 0). */
+    uint32_t          irq_seq[QUETZ_MAX_MMIO_VCORES][QUETZ_MAX_IRQ_LINES];
 };
 
 static int map_shmem(const char *shmname, QuetzIpcClient *c)
@@ -143,4 +145,42 @@ void quetz_ipc_mmio_write(QuetzIpcClient *client, unsigned vcpu,
 
     uint64_t ack = 0;
     wait_slot(sd, vcpu, &ack);
+}
+
+unsigned quetz_ipc_irq_drain(QuetzIpcClient *client, unsigned max_lines,
+                             QuetzIrqChange *out, unsigned max_out)
+{
+    QuetzSharedData *sd = client->shared;
+    unsigned n = 0;
+    size_t ncores;
+    size_t v;
+    unsigned l;
+
+    if (!sd || !out || max_out == 0)
+        return 0;
+    if (max_lines > QUETZ_MAX_IRQ_LINES)
+        max_lines = QUETZ_MAX_IRQ_LINES;
+
+    ncores = sd->numCores;
+    if (ncores > QUETZ_MAX_MMIO_VCORES)
+        ncores = QUETZ_MAX_MMIO_VCORES;
+
+    for (v = 0; v < ncores; v++) {
+        for (l = 0; l < max_lines; l++) {
+            QuetzIrqSlot *slot = &sd->irq_slot[v][l];
+            /* Acquire pairs with SST's release-store of seq, so the level it
+             * published beforehand is visible; a level newer than the seq we
+             * saw is harmless (seq will have moved again by the next drain
+             * and we re-apply the same level — see quetz_ipc_types.h). */
+            uint32_t seq = __atomic_load_n(&slot->seq, __ATOMIC_ACQUIRE);
+            if (seq == client->irq_seq[v][l])
+                continue;
+            client->irq_seq[v][l] = seq;
+            out[n].line = l;
+            out[n].level = slot->level;
+            if (++n == max_out)
+                return n;
+        }
+    }
+    return n;
 }

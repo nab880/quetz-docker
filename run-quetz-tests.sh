@@ -108,10 +108,28 @@ if [ "${UPDATE_GOLD:-0}" = "1" ]; then
 fi
 
 echo "=== Quetz libmem ground-truth validation ==="
-if python3 "${QUETZ_DIR}/tests/validate_against_libmem.py"; then
+if python3 "${QUETZ_DIR}/tests/manual/validate_against_libmem.py"; then
     :
 else
     echo "WARN: libmem validation failed (non-fatal until baselined)"
+fi
+
+echo "=== quetz-run smoke (packaging contract) ==="
+if command -v quetz-run >/dev/null; then
+    SMOKE_OUT=/tmp/quetz-run-smoke
+    rm -rf "${SMOKE_OUT}"
+    if quetz-run --no-docker --quiet --out "${SMOKE_OUT}"; then
+        for f in transcript.txt stats.csv sst.log result.txt; do
+            [ -s "${SMOKE_OUT}/${f}" ] || { echo "FAIL: quetz-run artifact ${f} missing/empty"; exit 1; }
+        done
+        grep -q "SYSTEM DEMO PASS" "${SMOKE_OUT}/transcript.txt" \
+            || { echo "FAIL: demo transcript missing PASS line"; exit 1; }
+        echo "quetz-run smoke OK (exit 0, artifacts complete)"
+    else
+        echo "FAIL: quetz-run demo did not exit 0"; exit 1
+    fi
+else
+    echo "quetz-run not on PATH; skipping smoke"
 fi
 
 echo "=== All Quetz tests passed ==="

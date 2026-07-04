@@ -1,0 +1,192 @@
+#!/bin/bash
+# quetz-run — run a quetz simulation and get transcript + stats + pass/fail.
+#
+#   quetz-run [--deck PATH] [--firmware ELF] [--stdin FILE] [--sensor FILE]
+#             [--sink NAME] [--env K=V]... [--out DIR] [--timeout SEC]
+#             [--image NAME] [--no-docker] [--quiet]
+#
+# With no arguments, runs the shipped ColdFire system demo (freestanding
+# firmware: UART console + GPS NMEA replay + sensor stream + accelerator).
+#
+# Artifacts (in --out, default ./artifacts):
+#   transcript.txt  guest serial output (QEMU chatter included)
+#   sst.log         full SST stdout+stderr (stats, component logs)
+#   stats.csv       SST statistics (CSV)
+#   result.txt      PASS / FAIL / ERROR + detail
+#   <NAME>          QuetzSinkDevice capture (--sink NAME): bytes the guest
+#                   pushed, for CI to diff against a golden file
+#
+# Exit code contract (CI-ready):
+#   0  guest sentinel reported PASS
+#   2  guest sentinel reported FAIL
+#   1  simulation error, timeout, or no sentinel seen
+set -u
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Workspace root = parent of quetz-docker (host mode); in-container the tree
+# is baked at /src.
+if [ -d "${SCRIPT_DIR}/../sst-elements" ]; then
+    WORKSPACE="$(cd "${SCRIPT_DIR}/.." && pwd)"
+else
+    WORKSPACE=""
+fi
+QUETZ_REL="src/sst/elements/quetz"
+
+DECK=""
+FIRMWARE=""
+STDIN_FILE=""
+SENSOR_FILE=""
+SINK_NAME=""
+OUT_DIR="./artifacts"
+TIMEOUT_SEC=600
+IMAGE="quetz-sim"
+NO_DOCKER=0
+QUIET=0
+declare -a EXTRA_ENV=()
+
+usage() {
+    sed -n '2,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    print_banner
+}
+
+print_banner() {
+    [ "${QUIET}" = 1 ] && return 0
+    local banner="${SCRIPT_DIR}/BSP-HONESTY.txt"
+    if [ -f "${banner}" ]; then
+        cat "${banner}" >&2
+    else
+        echo "note: unmodified board BSPs are not supported yet (init hangs on status" >&2
+        echo "polls; writes to unmodeled SoC registers are silently ignored). Run" >&2
+        echo "freestanding firmware or port app + drivers. See" >&2
+        echo "sst-elements/${QUETZ_REL}/SIMULATING-YOUR-SYSTEM.md" >&2
+    fi
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --deck)      DECK="$2"; shift 2 ;;
+        --firmware)  FIRMWARE="$2"; shift 2 ;;
+        --stdin)     STDIN_FILE="$2"; shift 2 ;;
+        --sensor)    SENSOR_FILE="$2"; shift 2 ;;
+        --sink)      SINK_NAME="$2"; shift 2 ;;
+        --env)       EXTRA_ENV+=("$2"); shift 2 ;;
+        --out)       OUT_DIR="$2"; shift 2 ;;
+        --timeout)   TIMEOUT_SEC="$2"; shift 2 ;;
+        --image)     IMAGE="$2"; shift 2 ;;
+        --no-docker) NO_DOCKER=1; shift ;;
+        --quiet)     QUIET=1; shift ;;
+        -h|--help)   usage; exit 0 ;;
+        *) echo "quetz-run: unknown argument '$1' (see --help)" >&2; exit 1 ;;
+    esac
+done
+
+print_banner
+
+mkdir -p "${OUT_DIR}" || { echo "quetz-run: cannot create ${OUT_DIR}" >&2; exit 1; }
+OUT_DIR="$(cd "${OUT_DIR}" && pwd)"
+: > "${OUT_DIR}/sst.log"
+rm -f "${OUT_DIR}/transcript.txt" "${OUT_DIR}/stats.csv" "${OUT_DIR}/result.txt"
+
+fail_setup() { echo "quetz-run: $1" >&2; echo "ERROR: $1" > "${OUT_DIR}/result.txt"; exit 1; }
+
+# ---------------------------------------------------------------------------
+# In-container (or --no-docker) execution: run sst directly.
+# ---------------------------------------------------------------------------
+if [ "${NO_DOCKER}" = 1 ] || [ -f /.dockerenv ]; then
+    ELEM_DIR=""
+    for c in "/src/sst-elements/${QUETZ_REL}" "${WORKSPACE}/sst-elements/${QUETZ_REL}"; do
+        [ -n "${c}" ] && [ -d "${c}" ] && ELEM_DIR="${c}" && break
+    done
+    [ -n "${ELEM_DIR}" ] || fail_setup "quetz element tree not found"
+
+    [ -n "${DECK}" ] || DECK="${ELEM_DIR}/tests/sysmode/basic_quetz_coldfire_system.py"
+    [ -f "${DECK}" ] || fail_setup "deck not found: ${DECK}"
+
+    export QUETZ_MMIO_PAYLOAD="${QUETZ_MMIO_PAYLOAD:-1}"
+    export QUETZ_MMIO_START="${QUETZ_MMIO_START:-0x70000000}"
+    export QUETZ_MMIO_END="${QUETZ_MMIO_END:-0x7001FFFF}"
+    export QUETZ_STDOUT_FILE="${OUT_DIR}/transcript.txt"
+    export QUETZ_STATS_OUT="${OUT_DIR}/stats.csv"
+    [ -n "${FIRMWARE}" ]    && export QUETZ_EXE="${FIRMWARE}"
+    [ -n "${STDIN_FILE}" ]  && export QUETZ_STDIN_FILE="${STDIN_FILE}"
+    [ -n "${SENSOR_FILE}" ] && export QUETZ_SENSOR_FILE="${SENSOR_FILE}"
+    # Sink capture is an artifact by construction: the device writes it
+    # directly into the artifacts dir.
+    [ -n "${SINK_NAME}" ]   && export QUETZ_SINK_FILE="${OUT_DIR}/$(basename "${SINK_NAME}")"
+    for kv in ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}; do export "${kv?}"; done
+
+    command -v sst >/dev/null || fail_setup "sst not on PATH (use the quetz-sim image, or omit --no-docker)"
+
+    cd "${OUT_DIR}"
+    if command -v timeout >/dev/null; then
+        timeout "${TIMEOUT_SEC}" sst "${DECK}" >> "${OUT_DIR}/sst.log" 2>&1
+    else
+        sst "${DECK}" >> "${OUT_DIR}/sst.log" 2>&1   # no coreutils timeout (macOS)
+    fi
+    SST_RC=$?
+
+    RESULT="ERROR" ; RC=1 ; DETAIL="no TestFinisher sentinel in output (sst exit ${SST_RC})"
+    if grep -q "TESTFINISH\[[0-9]*\].*(PASS)" "${OUT_DIR}/sst.log"; then
+        RESULT="PASS"; RC=0; DETAIL="guest sentinel reported PASS"
+    elif grep -q "TESTFINISH\[[0-9]*\].*(FAIL)" "${OUT_DIR}/sst.log"; then
+        RESULT="FAIL"; RC=2; DETAIL="guest sentinel reported FAIL"
+    elif [ "${SST_RC}" = 124 ]; then
+        DETAIL="timeout after ${TIMEOUT_SEC}s"
+    fi
+    echo "${RESULT}: ${DETAIL}" > "${OUT_DIR}/result.txt"
+    [ "${QUIET}" = 1 ] || echo "quetz-run: ${RESULT} — artifacts in ${OUT_DIR}" >&2
+    exit "${RC}"
+fi
+
+# ---------------------------------------------------------------------------
+# Host mode: stage inputs, re-invoke inside the container.
+# ---------------------------------------------------------------------------
+command -v docker >/dev/null || fail_setup "docker not found (or use --no-docker on a host with sst installed)"
+[ -n "${WORKSPACE}" ] || fail_setup "workspace not found (run from the raptor-balar checkout)"
+
+if ! docker image inspect "${IMAGE}" >/dev/null 2>&1; then
+    if docker image inspect "raptor-quetz-test:arm64" >/dev/null 2>&1; then
+        echo "quetz-run: image '${IMAGE}' not found; falling back to raptor-quetz-test:arm64" >&2
+        IMAGE="raptor-quetz-test:arm64"
+    else
+        fail_setup "image '${IMAGE}' not found — build it: docker build --target runtime -t quetz-sim -f quetz-docker/Dockerfile ."
+    fi
+fi
+
+mkdir -p "${OUT_DIR}/inputs"
+declare -a RUN_ARGS=(--quiet --no-docker --out /out --timeout "${TIMEOUT_SEC}")
+
+stage_file() {  # $1 host path, $2 flag name -> echoes container path
+    local host="$1"
+    [ -f "${host}" ] || fail_setup "$2 file not found: ${host}"
+    cp -f "${host}" "${OUT_DIR}/inputs/$(basename "${host}")"
+    echo "/out/inputs/$(basename "${host}")"
+}
+
+if [ -n "${DECK}" ]; then
+    case "$(cd "$(dirname "${DECK}")" && pwd)/" in
+        "${WORKSPACE}/sst-elements/"*)
+            # Deck inside the tree: translate to the container mount so its
+            # relative imports (quetz_test_helpers) keep working.
+            REL="$(python3 -c "import os,sys;print(os.path.relpath(sys.argv[1],sys.argv[2]))" "${DECK}" "${WORKSPACE}/sst-elements")"
+            RUN_ARGS+=(--deck "/src/sst-elements/${REL}") ;;
+        *)
+            RUN_ARGS+=(--deck "$(stage_file "${DECK}" --deck)") ;;
+    esac
+fi
+[ -n "${FIRMWARE}" ]    && RUN_ARGS+=(--firmware "$(stage_file "${FIRMWARE}" --firmware)")
+[ -n "${STDIN_FILE}" ]  && RUN_ARGS+=(--stdin  "$(stage_file "${STDIN_FILE}" --stdin)")
+[ -n "${SENSOR_FILE}" ] && RUN_ARGS+=(--sensor "$(stage_file "${SENSOR_FILE}" --sensor)")
+[ -n "${SINK_NAME}" ]   && RUN_ARGS+=(--sink "$(basename "${SINK_NAME}")")
+for kv in ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}; do RUN_ARGS+=(--env "${kv}"); done
+
+docker run --rm \
+    -v "${WORKSPACE}/sst-elements:/src/sst-elements:ro" \
+    -v "${OUT_DIR}:/out" \
+    -v "${SCRIPT_DIR}:/quetz-docker:ro" \
+    "${IMAGE}" \
+    bash /quetz-docker/quetz-run "${RUN_ARGS[@]}"
+RC=$?
+[ "${QUIET}" = 1 ] || { [ -f "${OUT_DIR}/result.txt" ] && echo "quetz-run: $(cat "${OUT_DIR}/result.txt") — artifacts in ${OUT_DIR}" >&2; }
+exit "${RC}"

@@ -14,7 +14,7 @@ IMAGE="${RAPTOR_QUETZ_IMAGE:-raptor-quetz-test}"
 cd "${ROOT}"
 
 echo "=== Building ${IMAGE} (this may take several minutes) ==="
-docker build -t "${IMAGE}" -f quetz-docker/Dockerfile .
+docker build --target build -t "${IMAGE}" -f quetz-docker/Dockerfile .
 
 echo "=== Running Quetz tests ==="
 docker run --rm \

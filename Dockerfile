@@ -1,13 +1,21 @@
-# SST + Quetz test environment (user-mode and system-mode QEMU).
+# SST + Quetz images (user-mode and system-mode QEMU).
 #
-# Build from workspace root (parent of this repo, with sst-core/ and sst-elements/):
-#   docker build -t raptor-quetz-test -f quetz-docker/Dockerfile .
-# Run:
-#   ./quetz-docker/build-and-test.sh
-# Gold:
-#   UPDATE_GOLD=1 ./quetz-docker/build-and-test.sh
+# Two targets, built from the workspace root (parent of this repo, with
+# sst-core/ and sst-elements/):
+#
+#   test env (toolchain + /build tree + testsuite):
+#     docker build --target build -t raptor-quetz-test -f quetz-docker/Dockerfile .
+#     ./quetz-docker/build-and-test.sh
+#     UPDATE_GOLD=1 ./quetz-docker/build-and-test.sh
+#
+#   user runtime (slim: sim + cross compilers + quetz-run; no build tree):
+#     docker build --target runtime -t quetz-sim -f quetz-docker/Dockerfile .
+#     ./quetz-docker/quetz-run              # runs the ColdFire system demo
+#
+# NOTE: images bake the element at build time — rebuild after sst-elements
+# changes (the test scripts rebuild from the /src mount; quetz-run does not).
 
-FROM ubuntu:24.04
+FROM ubuntu:24.04 AS build
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV SST_PREFIX=/opt/sst
@@ -64,9 +72,12 @@ RUN curl -fsSL "https://download.qemu.org/qemu-${QEMU_VERSION}.tar.xz" \
     && (test -f "${QEMU_PREFIX}/include/qemu-plugin.h" \
         || cp include/plugins/qemu-plugin.h "${QEMU_PREFIX}/include/qemu-plugin.h") \
     && mkdir -p "${QEMU_PREFIX}/lib/qemu/plugins" \
-    && cp -a build/contrib/plugins/*.so "${QEMU_PREFIX}/lib/qemu/plugins/" 2>/dev/null \
+    # Parenthesized so the optional contrib-plugin copy is the ONLY thing the
+    # `|| true` forgives — unparenthesized it swallowed failures of the whole
+    # && chain, letting a broken QEMU build produce a "successful" layer.
+    && (cp -a build/contrib/plugins/*.so "${QEMU_PREFIX}/lib/qemu/plugins/" 2>/dev/null \
         || cp -a contrib/plugins/*.so "${QEMU_PREFIX}/lib/qemu/plugins/" 2>/dev/null \
-        || true \
+        || true) \
     && rm -rf "/tmp/qemu-${QEMU_VERSION}"
 
 ENV QEMU_PLUGIN_DIR="${QEMU_PREFIX}/lib/qemu/plugins"
@@ -88,7 +99,11 @@ WORKDIR /src
 COPY sst-core /src/sst-core
 COPY sst-elements /src/sst-elements
 
-RUN "${QEMU_PREFIX}/bin/qemu-system-x86_64" --version | head -1
+# Sanity: the build must have produced real system emulators. No pipe (the
+# old `qemu-system-x86_64 --version | head -1` always passed: x86_64-softmmu
+# is not even in the target list and head's exit status masked the 127).
+RUN "${QEMU_PREFIX}/bin/qemu-system-m68k" --version \
+    && "${QEMU_PREFIX}/bin/qemu-system-riscv64" --version
 
 # --- SST-Core ---
 RUN cd /src/sst-core \
@@ -114,7 +129,50 @@ RUN "${SST_PREFIX}/bin/sst-register" SST_ELEMENT_SOURCE quetz=/src/sst-elements/
     && "${SST_PREFIX}/bin/sst-register" SST_ELEMENT_TESTS quetz=/src/sst-elements/src/sst/elements/quetz/tests
 
 COPY quetz-docker/run-quetz-tests.sh /usr/local/bin/run-quetz-tests.sh
-RUN chmod +x /usr/local/bin/run-quetz-tests.sh
+COPY quetz-docker/quetz-run /usr/local/bin/quetz-run
+RUN chmod +x /usr/local/bin/run-quetz-tests.sh /usr/local/bin/quetz-run
 
 WORKDIR /src/sst-elements/src/sst/elements/quetz/tests
 CMD ["/usr/local/bin/run-quetz-tests.sh"]
+
+# ---------------------------------------------------------------------------
+# Runtime image (quetz-sim): everything needed to RUN simulations and build
+# guest firmware — no autotools, no /build tree, no testsuite scaffolding.
+# ---------------------------------------------------------------------------
+FROM ubuntu:24.04 AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV SST_PREFIX=/opt/sst
+ENV QEMU_PREFIX=/opt/qemu
+ENV PATH="${SST_PREFIX}/bin:${QEMU_PREFIX}/bin:${PATH}"
+ENV LD_LIBRARY_PATH="${SST_PREFIX}/lib"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    gcc-m68k-linux-gnu \
+    gcc-riscv64-linux-gnu \
+    libc6-dev-riscv64-cross \
+    libcap-ng0 \
+    libglib2.0-0 \
+    libnuma1 \
+    libpixman-1-0 \
+    libpython3.12 \
+    libslirp0 \
+    libstdc++6 \
+    openmpi-bin \
+    python3 \
+    zlib1g \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /opt/qemu /opt/qemu
+COPY --from=build /opt/sst /opt/sst
+# The element source tree: decks, test helpers, firmware + fixtures, docs.
+# (sst-register paths in /opt/sst/etc point here.)
+COPY --from=build /src/sst-elements/src/sst/elements/quetz /src/sst-elements/src/sst/elements/quetz
+
+COPY quetz-docker/quetz-run /usr/local/bin/quetz-run
+COPY quetz-docker/BSP-HONESTY.txt /usr/local/bin/BSP-HONESTY.txt
+RUN chmod +x /usr/local/bin/quetz-run
+
+WORKDIR /work
+CMD ["quetz-run", "--help"]
