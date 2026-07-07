@@ -5,9 +5,11 @@
 #include <fcntl.h>
 #include <linux/futex.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
@@ -34,6 +36,16 @@ static int map_shmem(const char *shmname, QuetzIpcClient *c)
     if (c->fd < 0)
         return -1;
 
+    /* The real segment size comes from the fd, not from header fields we are
+     * about to distrust. */
+    struct stat st;
+    if (fstat(c->fd, &st) != 0 || st.st_size <= 0) {
+        close(c->fd);
+        c->fd = -1;
+        return -1;
+    }
+    size_t seg_size = (size_t)st.st_size;
+
     void *hdr = mmap(NULL, sizeof(struct QuetzInternalSharedData),
                      PROT_READ, MAP_SHARED, c->fd, 0);
     if (hdr == MAP_FAILED) {
@@ -46,8 +58,27 @@ static int map_shmem(const char *shmname, QuetzIpcClient *c)
     size_t shared_off = ((struct QuetzInternalSharedData *)hdr)->offsets[0];
     munmap(hdr, sizeof(struct QuetzInternalSharedData));
 
-    if (map_size < sizeof(QuetzSharedData))
-        map_size = 4 * 1024 * 1024;
+    /* QuetzInternalSharedData hand-mirrors SST-core's private tunnel header;
+     * if that layout drifted, these values are garbage. Validate every
+     * derived quantity against the fd-reported size BEFORE mapping/using it,
+     * and then check the layout magic the SST master stamped at the END of
+     * QuetzSharedData — a wrong shared_off or a QuetzSharedData layout skew
+     * both land off-magic and fail here, loudly, instead of corrupting
+     * guest-visible MMIO values. */
+    if (map_size < sizeof(struct QuetzInternalSharedData) ||
+        map_size > seg_size ||
+        shared_off > map_size ||
+        sizeof(QuetzSharedData) > map_size - shared_off) {
+        fprintf(stderr,
+                "quetz-ipc: shmem '%s' header rejected (map_size=%zu "
+                "seg_size=%zu shared_off=%zu need=%zu) — SST-core tunnel "
+                "layout skew?\n",
+                shmname, map_size, seg_size, shared_off,
+                sizeof(QuetzSharedData));
+        close(c->fd);
+        c->fd = -1;
+        return -1;
+    }
 
     c->map = mmap(NULL, map_size, PROT_READ | PROT_WRITE, MAP_SHARED, c->fd, 0);
     if (c->map == MAP_FAILED) {
@@ -57,6 +88,19 @@ static int map_shmem(const char *shmname, QuetzIpcClient *c)
     }
     c->map_size = map_size;
     c->shared = (QuetzSharedData *)((uint8_t *)c->map + shared_off);
+
+    if (c->shared->magic != QUETZ_SHM_MAGIC) {
+        fprintf(stderr,
+                "quetz-ipc: shmem '%s' layout magic mismatch (got 0x%08x, "
+                "want 0x%08x) — rebuild the QEMU overlay against the same "
+                "quetz_ipc_types.h as the SST side.\n",
+                shmname, c->shared->magic, QUETZ_SHM_MAGIC);
+        munmap(c->map, c->map_size);
+        c->map = NULL;
+        close(c->fd);
+        c->fd = -1;
+        return -1;
+    }
     return 0;
 }
 

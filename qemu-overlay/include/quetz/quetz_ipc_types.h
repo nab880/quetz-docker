@@ -42,8 +42,14 @@ typedef struct QuetzMmioSyncRequest {
  * acquire-load of `seq` and re-applies qemu_set_irq(level) whenever seq moved.
  * QEMU never writes the slot, so there is no lost-update window — a consumer
  * that pairs a stale seq with a newer level merely re-applies the same level
- * on its next poll tick. Level semantics (not edges): the device holds the
- * line raised until the guest acks it through the device's MMIO ack register.
+ * on its next poll tick.
+ *
+ * CONTRACT (level semantics, not edges): the slot carries the CURRENT line
+ * level and the poller only observes the latest value — a raise followed by
+ * a lower between two poll ticks collapses to the final level, so transient
+ * pulses are lost BY DESIGN. SST devices must hold the line raised while
+ * unconsumed work exists and lower it only once the guest has acked
+ * everything; under that discipline the collapsed observation is correct.
  */
 #define QUETZ_MAX_IRQ_LINES 64
 
@@ -51,6 +57,13 @@ typedef struct QuetzIrqSlot {
     volatile uint32_t seq;    /* release-store by SST, acquire-load by QEMU */
     uint32_t          level;  /* 1 = raise, 0 = lower */
 } QuetzIrqSlot;
+
+/* Layout stamp written by the SST master at init; verified before any use of
+ * the region (quetz_ipc_attach). Last field on purpose: its offset moves if
+ * this struct or SST-core's tunnel header drifts, so skew fails the attach
+ * loudly instead of corrupting MMIO values silently. 'QZM' + layout version —
+ * must match sst-elements/quetz/quetz_ipc_types.h exactly. */
+#define QUETZ_SHM_MAGIC 0x515A4D01u
 
 typedef struct QuetzSharedData {
     size_t            numCores;
@@ -61,6 +74,8 @@ typedef struct QuetzSharedData {
     QuetzMmioResponseSlot mmio_slot[QUETZ_MAX_MMIO_VCORES];
     QuetzMmioSyncRequest  mmio_req[QUETZ_MAX_MMIO_VCORES];
     QuetzIrqSlot          irq_slot[QUETZ_MAX_MMIO_VCORES][QUETZ_MAX_IRQ_LINES];
+    volatile uint32_t magic;   /* QUETZ_SHM_MAGIC — keep as the LAST field */
+    uint32_t          _pad1;
 } QuetzSharedData;
 
 #ifdef __cplusplus
