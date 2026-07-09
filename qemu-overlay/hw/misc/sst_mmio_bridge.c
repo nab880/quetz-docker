@@ -24,6 +24,7 @@
 #include "exec/address-spaces.h"
 #include "exec/memory.h"
 #include "qapi/error.h"
+#include "qemu/error-report.h"
 
 #include <errno.h>
 
@@ -84,6 +85,16 @@ static void sst_mmio_bridge_irq_poll(void *opaque)
         n = quetz_ipc_irq_drain(s->ipc, s->irq_count, changes,
                                 QUETZ_MAX_IRQ_LINES);
         for (unsigned i = 0; i < n; i++) {
+            /* The bridge wires a single INTC, fed from mailbox row 0. A
+             * change posted to another vcore's row must not clobber row 0's
+             * level on the same line (last-writer-wins on one GPIO). */
+            if (changes[i].vcore != 0) {
+                warn_report_once("sst-mmio-bridge: dropping IRQ line %u "
+                                 "change posted to vcore %u (only vcore 0 "
+                                 "is wired to the INTC)",
+                                 changes[i].line, changes[i].vcore);
+                continue;
+            }
             qemu_set_irq(s->irqs[changes[i].line], changes[i].level != 0);
         }
     } while (n == QUETZ_MAX_IRQ_LINES);

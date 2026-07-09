@@ -63,7 +63,7 @@ typedef struct QuetzIrqSlot {
  * this struct or SST-core's tunnel header drifts, so skew fails the attach
  * loudly instead of corrupting MMIO values silently. 'QZM' + layout version —
  * must match sst-elements/quetz/quetz_ipc_types.h exactly. */
-#define QUETZ_SHM_MAGIC 0x515A4D01u
+#define QUETZ_SHM_MAGIC 0x515A4D02u
 
 typedef struct QuetzSharedData {
     size_t            numCores;
@@ -74,6 +74,10 @@ typedef struct QuetzSharedData {
     QuetzMmioResponseSlot mmio_slot[QUETZ_MAX_MMIO_VCORES];
     QuetzMmioSyncRequest  mmio_req[QUETZ_MAX_MMIO_VCORES];
     QuetzIrqSlot          irq_slot[QUETZ_MAX_MMIO_VCORES][QUETZ_MAX_IRQ_LINES];
+    /* Bumped (release) by SST on every postIrq; the bridge's poll tick
+     * acquire-loads it and skips the whole irq_slot scan when unchanged. */
+    volatile uint32_t irq_generation;
+    uint32_t          _pad2;
     volatile uint32_t magic;   /* QUETZ_SHM_MAGIC — keep as the LAST field */
     uint32_t          _pad1;
 } QuetzSharedData;

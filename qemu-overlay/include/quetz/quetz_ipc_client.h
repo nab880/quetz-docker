@@ -18,6 +18,7 @@ void quetz_ipc_mmio_write(QuetzIpcClient *client, unsigned vcpu,
 
 /* One IRQ-line level change drained from the reverse mailbox. */
 typedef struct QuetzIrqChange {
+    uint32_t vcore;  /* mailbox row the change was posted to */
     uint32_t line;   /* machine IRQ line number */
     uint32_t level;  /* 1 = raise, 0 = lower */
 } QuetzIrqChange;

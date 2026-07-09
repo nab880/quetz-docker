@@ -28,6 +28,9 @@ struct QuetzIpcClient {
     QuetzSharedData  *shared;
     /* Per-slot seq shadow for quetz_ipc_irq_drain (slots start at seq 0). */
     uint32_t          irq_seq[QUETZ_MAX_MMIO_VCORES][QUETZ_MAX_IRQ_LINES];
+    /* Shadow of shared irq_generation as of the last COMPLETE drain scan;
+     * an unchanged generation lets the drain skip the whole slot matrix. */
+    uint32_t          irq_gen;
 };
 
 static int map_shmem(const char *shmname, QuetzIpcClient *c)
@@ -205,6 +208,16 @@ unsigned quetz_ipc_irq_drain(QuetzIpcClient *client, unsigned max_lines,
     if (max_lines > QUETZ_MAX_IRQ_LINES)
         max_lines = QUETZ_MAX_IRQ_LINES;
 
+    /* One acquire-load instead of scanning the whole (vcore, line) matrix on
+     * every poll tick. Acquire pairs with SST's release-store of
+     * irq_generation, which happens after the slot it describes — so a moved
+     * generation guarantees the changed slot's seq/level are visible below.
+     * The shadow only advances after a COMPLETE scan; an early return (out
+     * full) leaves it stale so the caller's next drain rescans. */
+    uint32_t gen = __atomic_load_n(&sd->irq_generation, __ATOMIC_ACQUIRE);
+    if (gen == client->irq_gen)
+        return 0;
+
     ncores = sd->numCores;
     if (ncores > QUETZ_MAX_MMIO_VCORES)
         ncores = QUETZ_MAX_MMIO_VCORES;
@@ -220,11 +233,13 @@ unsigned quetz_ipc_irq_drain(QuetzIpcClient *client, unsigned max_lines,
             if (seq == client->irq_seq[v][l])
                 continue;
             client->irq_seq[v][l] = seq;
+            out[n].vcore = (uint32_t)v;
             out[n].line = l;
             out[n].level = slot->level;
             if (++n == max_out)
-                return n;
+                return n;   /* scan incomplete: irq_gen stays stale */
         }
     }
+    client->irq_gen = gen;
     return n;
 }
