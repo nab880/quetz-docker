@@ -34,10 +34,17 @@ docker build --target runtime -t quetz-sim -f quetz-docker/Dockerfile .
 Artifacts: `transcript.txt` (guest serial), `stats.csv`, `sst.log`,
 `result.txt`. Own deck: start from
 `sst-elements/src/sst/elements/quetz/tests/sysmode/template_system.py`.
-Fixture tooling lives in `sst-elements/.../quetz/tools/`. Full walkthrough:
-`SIMULATING-YOUR-SYSTEM.md` in the element. **Images bake the element at
-build time — rebuild `quetz-sim` after changing element code** (the test
-image instead rebuilds from the `/src` mount at test time).
+Fixture tooling lives in `sst-elements/.../quetz/tools/`.
+
+**New to ColdFire firmware?** Start with
+`sst-elements/src/sst/elements/quetz/GETTING-STARTED.md` (Docker-only V4
+walkthrough). Full system integration:
+`sst-elements/.../quetz/SIMULATING-YOUR-SYSTEM.md`.
+
+**Images bake the element at build time — rebuild `quetz-sim` after changing
+Quetz C++ or the QEMU overlay** (the test image instead rebuilds from the
+`/src` mount at test time; `quetz-run` bind-mounts decks/firmware from your
+checkout but `libquetz.so` comes from the image).
 
 ---
 
@@ -45,7 +52,7 @@ image instead rebuilds from the `/src` mount at test time).
 
 | Requirement | Notes |
 |-------------|--------|
-| **Docker** | Desktop or Engine; ~8 GB free disk for the image |
+| **Docker** | Desktop or Engine; ~4 GB disk for `quetz-sim` (runtime), ~8 GB for `raptor-quetz-test` (full build + testsuite) |
 | **RAM** | Build uses `make -j2` to reduce OOM risk; 8 GB+ recommended |
 | **Git** | To clone the sibling repos below |
 
@@ -74,9 +81,13 @@ quetz-workspace/
 └── quetz-docker/      # this repo
 ```
 
-All commands below assume your shell is at **`quetz-workspace/`** (the parent of all three directories).
+All commands below assume your shell is at the **workspace root** (the parent
+of `sst-elements/` and `quetz-docker/`).
 
-> **Tip:** If you keep a local checkout named `raptor/` with the same three siblings, that works too — only the relative paths matter.
+> **Tip:** A two-repo layout works too — e.g. `raptor-balar/` with
+> `sst-elements/` and `quetz-docker/` siblings (no separate `sst-core` clone
+> on the host; it is compiled inside the Docker image). The three-repo layout
+> below is for developers building SST from source outside Docker.
 
 ---
 
