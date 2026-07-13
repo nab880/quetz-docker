@@ -161,7 +161,7 @@ The volume mount means changes under `sst-elements/src/sst/elements/quetz/tests/
 |--------------|--------|
 | Python tests, SDL, gold files | Re-run tests only (no rebuild) |
 | Quetz C++ / plugin / `Makefile.am` / `configure.m4` | Full rebuild: `./quetz-docker/build-and-test.sh` |
-| QEMU overlay (`qemu-overlay/`) or `Dockerfile` | Full rebuild (QEMU layer is baked in) |
+| Quetz QEMU overlay (`sst-elements/src/sst/elements/quetz/qemu-overlay/`) or `Dockerfile` | Full rebuild (QEMU layer is baked in) |
 | Fast iteration on Quetz C++ only | `./quetz-docker/rebuild-quetz-usermode-gpu.sh` (rebuilds `libquetz` inside existing image) |
 
 ### Full rebuild
@@ -223,20 +223,22 @@ Environment variables set in the container:
 ## QEMU overlay (pinned)
 
 **Base: upstream QEMU 9.2.1** (fetched from download.qemu.org in the
-Dockerfile; `ARG QEMU_VERSION` pins it). The `qemu-overlay/` directory is
-applied by `apply-qemu-overlay.sh` — it fails loudly if any piece does not
-apply, so a QEMU version bump cannot silently drop the overlay.
+Dockerfile; `ARG QEMU_VERSION` pins it). The overlay lives with the Quetz
+element at `sst-elements/src/sst/elements/quetz/qemu-overlay/` and is applied
+by `apply-qemu-overlay.sh`. It fails loudly if any piece does not apply, so a
+QEMU version bump cannot silently drop the overlay.
 
 Copied sources:
 
 | Component | Purpose |
 |-----------|---------|
 | `hw/misc/sst_mmio_bridge.c` | Sysmode `-device sst-mmio-bridge` — guest MMIO loads/stores block until SST responds; with `irq-count=N` also polls the reverse IRQ mailbox on a virtual-time timer and drives interrupt-controller GPIO inputs (SST-device IRQ injection) |
+| `hw/misc/mcf_bsp_compat.c` | Profile-driven ColdFire BSP initialization register compatibility device |
 | `quetz_ipc_client.c` | Standalone shared-memory IPC client (no SST dependency); includes the seqlock IRQ-slot drain (`quetz_ipc_irq_drain`) |
 | `include/quetz/quetz_ipc_{client,types}.h` | C mirror of the Quetz IPC layout (mailbox + per-(vcore, line) IRQ slots) |
 | `linux-user/sst_mmio.{c,h}` | Usermode (P6): PROT_NONE aperture + SIGSEGV routing to the same sync mailbox |
 
-Patches (`qemu-overlay/patches/`, ordered), plus anchor-based idempotent
+Patches (`sst-elements/src/sst/elements/quetz/qemu-overlay/patches/`, ordered), plus anchor-based idempotent
 edits made directly by `apply-qemu-overlay.sh`:
 
 | Patch | Touches |
@@ -255,6 +257,14 @@ Consumers: the Quetz launcher passes
 `,irq-count=N[,irq-poll-ns=...][,intc-type=...]` to the sysmode bridge when
 `QUETZ_IRQ_LINES` is set (SST-device IRQ injection; `intc-type` defaults to
 `mcf-intc`).
+
+For private MCF5208 BSPs, `quetz-run --bsp-discover` asks the launcher to
+add `-device mcf-bsp-compat,discover=on` and postprocesses the access log.
+`--bsp-profile FILE` instead stages a reviewed JSON register profile. Both
+are system-mode-only and opt-in; the no-option QEMU baseline is unchanged.
+See
+`sst-elements/src/sst/elements/quetz/BSP-COMPATIBILITY.md`
+for the workflow, profile schema, allowed blocks, and limitations.
 
 **Rebuild procedure** (e.g. after editing the overlay or bumping
 `QEMU_VERSION`): the QEMU build is one cached Docker layer — rerun
@@ -281,13 +291,11 @@ quetz-docker/
 ├── run-balar-tests.sh          # In-container Balar test driver
 ├── README-balar.md             # Balar / QuetzTestCPU contract test guide
 ├── rebuild-quetz-usermode-gpu.sh  # Fast libquetz rebuild + GPU tests
-├── qemu-overlay/               # QEMU 9.2.1 MMIO bridge overlay
-│   ├── apply-qemu-overlay.sh
-│   ├── hw/misc/sst_mmio_bridge.c
-│   ├── quetz_ipc_client.c
-│   └── include/quetz/
 └── README.md                   # this file
 ```
+
+The Quetz-owned QEMU overlay is under
+`sst-elements/src/sst/elements/quetz/qemu-overlay/`.
 
 ---
 

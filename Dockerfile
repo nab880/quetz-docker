@@ -56,7 +56,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Ubuntu/Fedora packages do not ship qemu-plugin.h — build QEMU 9.2 with plugins.
 ARG QEMU_VERSION=9.2.1
 ENV QEMU_PREFIX=/opt/qemu
-COPY quetz-docker/qemu-overlay /docker/qemu-overlay
+COPY sst-elements/src/sst/elements/quetz/qemu-overlay /docker/qemu-overlay
 RUN curl -fsSL "https://download.qemu.org/qemu-${QEMU_VERSION}.tar.xz" \
         | tar xJ -C /tmp \
     && cd "/tmp/qemu-${QEMU_VERSION}" \

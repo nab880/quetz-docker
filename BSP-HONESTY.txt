@@ -1,6 +1,5 @@
-note: quetz runs freestanding firmware (or your app + drivers ported onto the
-quetz startup scaffold). Unmodified board BSPs are NOT supported yet: QEMU's
-mcf5208evb reads unmodeled SoC registers as zero and ignores writes, so BSP
-init HANGS on status polls (PLL lock etc.) and silently loses config writes —
-it does not crash. Porting pattern and details:
-sst-elements/src/sst/elements/quetz/SIMULATING-YOUR-SYSTEM.md
+note: native QEMU treats unmodeled MCF5208 SoC registers as read-zero /
+write-ignored. Use --bsp-discover to diagnose a private BSP locally, then
+--bsp-profile with a hardware-reviewed register profile. This supports basic
+initialization correctness, not timing or peripheral data paths. Details:
+sst-elements/src/sst/elements/quetz/BSP-COMPATIBILITY.md
