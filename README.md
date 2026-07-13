@@ -238,18 +238,11 @@ Copied sources:
 | `include/quetz/quetz_ipc_{client,types}.h` | C mirror of the Quetz IPC layout (mailbox + per-(vcore, line) IRQ slots) |
 | `linux-user/sst_mmio.{c,h}` | Usermode (P6): PROT_NONE aperture + SIGSEGV routing to the same sync mailbox |
 
-Patches (`sst-elements/src/sst/elements/quetz/qemu-overlay/patches/`, ordered), plus anchor-based idempotent
-edits made directly by `apply-qemu-overlay.sh`:
-
-| Patch | Touches |
-|-------|---------|
-| `hw-misc-meson.patch` | registers the bridge sources with the softmmu build |
-| `linux-user-meson.patch` | registers the usermode sources |
-| `linux-user-main.patch` | `-sst-mmio-range` command-line option |
-| `linux-user-signal.patch` | SIGSEGV hook for the usermode aperture |
-| `qemu-options.def.patch` | option table entry |
-| (inline edit) `hw/m68k/mcf_intc.c` | exposes the 64 INTC inputs as qdev GPIOs so the bridge can inject IRQs by line number |
-| (inline edits) `linux-user/{meson.build,main.c,signal.c}` | usermode wiring for the pieces above |
+`apply-qemu-overlay.sh` is the sole wiring source. Its anchor-based,
+idempotent edits register the softmmu/usermode sources, add the
+`-sst-mmio-range` option and SIGSEGV hook, and expose `mcf_intc` inputs as qdev
+GPIOs. Obsolete hand-maintained patch snapshots were removed so they cannot
+drift from the build path.
 
 Consumers: the Quetz launcher passes
 `-device sst-mmio-bridge,shmname=...,base=...,size=...` (sysmode) or

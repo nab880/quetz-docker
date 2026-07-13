@@ -77,6 +77,8 @@ if command -v m68k-linux-gnu-gcc >/dev/null 2>&1; then
         echo "  building coldfire_gpu_fft..."
         ${M68K_CC} ${M68K_FLAGS} -DFFT_FIXED_POINT coldfire_startup.S coldfire_gpu_fft.c \
             -o coldfire_gpu_fft || echo "WARN: coldfire_gpu_fft build failed"
+        echo "  building expanded ColdFire regression firmware..."
+        (cd expanded && ./build.sh)
     )
 else
     echo "NOTE: m68k-linux-gnu-gcc not found — skipping ColdFire firmware build"
@@ -102,6 +104,10 @@ fi
 echo "=== Quetz integration tests ==="
 cd "${QUETZ_DIR}/tests"
 "${SST_PREFIX}/bin/sst-test-elements" -p "${TESTSUITE}"
+
+echo "=== Quetz expanded ColdFire regression tests ==="
+"${SST_PREFIX}/bin/sst-test-elements" \
+    -p "${QUETZ_DIR}/tests/expanded_coldfire_tests.py"
 
 if [ "${UPDATE_GOLD:-0}" = "1" ]; then
     echo "Gold files updated under src/sst/elements/quetz/tests/"
