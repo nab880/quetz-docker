@@ -1,19 +1,24 @@
 #!/bin/bash
 # quetz-run — run a quetz simulation and get transcript + stats + pass/fail.
 #
-#   quetz-run [--deck PATH] [--firmware ELF] [--stdin FILE] [--sensor FILE]
+#   quetz-run [--board raptor] [--oracle JSON] [--deck PATH] [--firmware ELF]
+#             [--stdin FILE] [--sensor FILE]
 #             [--sink NAME] [--env K=V]... [--out DIR] [--timeout SEC]
 #             [--bsp-discover] [--bsp-profile JSON] [--bsp-target mcf5208]
-#             [--image NAME] [--no-docker] [--quiet]
+#             [--image NAME] [--allow-dirty] [--acceptance]
+#             [--no-docker] [--quiet]
 #
 # With no arguments, runs the shipped ColdFire system demo (freestanding
 # firmware: UART console + GPS NMEA replay + sensor stream + accelerator).
 #
 # Artifacts (in --out, default ./artifacts):
-#   transcript.txt  guest serial output (QEMU chatter included)
-#   sst.log         full SST stdout+stderr (stats, component logs)
+#   uart.txt        guest UART bytes only
+#   events.jsonl    ordered host semantic events
+#   sst.log         SST/QEMU diagnostics only
 #   stats.csv       SST statistics (CSV)
 #   result.txt      PASS / FAIL / ERROR + detail
+#   result.json     structured oracle result
+#   effective-run.json and workspace-provenance.json  exact run identity
 #   <NAME>          QuetzSinkDevice capture (--sink NAME): bytes the guest
 #                   pushed, for CI to diff against a golden file
 #   bsp-mmio*.jsonl Raw/enriched BSP access trace (--bsp-discover)
@@ -21,10 +26,12 @@
 #   bsp-profile.generated.json  Inert observed-register profile skeleton
 #
 # Exit code contract (CI-ready):
-#   0  guest sentinel reported PASS
-#   2  guest sentinel reported FAIL
-#   1  simulation error, timeout, or no sentinel seen
+#   0  host oracle reported PASS
+#   2  host oracle reported FAIL
+#   1  setup error, simulator error, or timeout
 set -u
+
+ORIGINAL_ARGS=("$@")
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -32,6 +39,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # is baked at /src.
 if [ -d "${SCRIPT_DIR}/../sst-elements" ]; then
     WORKSPACE="$(cd "${SCRIPT_DIR}/.." && pwd)"
+elif [ -d /workspace/boards ]; then
+    WORKSPACE=/workspace
 else
     WORKSPACE=""
 fi
@@ -39,6 +48,15 @@ QUETZ_REL="src/sst/elements/quetz"
 
 DECK=""
 FIRMWARE=""
+BOARD=""
+BOARD_MANIFEST=""
+ORACLE=""
+ORACLE_ID="runner-setup"
+ACCEPTANCE=0
+ALLOW_DIRTY=0
+WORKSPACE_MANIFEST=""
+RUNTIME_IMAGE=""
+RUNTIME_DIGEST=""
 STDIN_FILE=""
 SENSOR_FILE=""
 SINK_NAME=""
@@ -50,6 +68,7 @@ QUIET=0
 BSP_DISCOVER=0
 BSP_PROFILE=""
 BSP_TARGET="mcf5208"
+OUTPUT_INITIALIZED=0
 declare -a EXTRA_ENV=()
 
 usage() {
@@ -71,24 +90,52 @@ print_banner() {
     fi
 }
 
+emit_setup_error() {
+    local detail="$1"
+    echo "quetz-run: ${detail}" >&2
+    mkdir -p "${OUT_DIR}" 2>/dev/null || exit 1
+    if [ "${OUTPUT_INITIALIZED}" = 0 ]; then
+        : > "${OUT_DIR}/sst.log"
+    fi
+    echo "ERROR: ${detail}" > "${OUT_DIR}/result.txt"
+    python3 "${SCRIPT_DIR}/quetz-result.py" \
+        --output "${OUT_DIR}/result.json" --oracle-id "${ORACLE_ID}" --detail "${detail}" \
+        >/dev/null 2>&1 || true
+    exit 1
+}
+
+require_value() {
+    if [ "$#" -lt 2 ] || [ -z "${2:-}" ] || [[ "${2}" == --* ]]; then
+        emit_setup_error "$1 requires a value"
+    fi
+}
+
 while [ $# -gt 0 ]; do
     case "$1" in
-        --deck)      DECK="$2"; shift 2 ;;
-        --firmware)  FIRMWARE="$2"; shift 2 ;;
-        --stdin)     STDIN_FILE="$2"; shift 2 ;;
-        --sensor)    SENSOR_FILE="$2"; shift 2 ;;
-        --sink)      SINK_NAME="$2"; shift 2 ;;
-        --env)       EXTRA_ENV+=("$2"); shift 2 ;;
-        --out)       OUT_DIR="$2"; shift 2 ;;
-        --timeout)   TIMEOUT_SEC="$2"; shift 2 ;;
+        --board)     require_value "$@"; BOARD="$2"; shift 2 ;;
+        --board-manifest) require_value "$@"; BOARD_MANIFEST="$2"; shift 2 ;;
+        --oracle)    require_value "$@"; ORACLE="$2"; shift 2 ;;
+        --deck)      require_value "$@"; DECK="$2"; shift 2 ;;
+        --firmware)  require_value "$@"; FIRMWARE="$2"; shift 2 ;;
+        --stdin)     require_value "$@"; STDIN_FILE="$2"; shift 2 ;;
+        --sensor)    require_value "$@"; SENSOR_FILE="$2"; shift 2 ;;
+        --sink)      require_value "$@"; SINK_NAME="$2"; shift 2 ;;
+        --env)       require_value "$@"; EXTRA_ENV+=("$2"); shift 2 ;;
+        --out)       require_value "$@"; OUT_DIR="$2"; shift 2 ;;
+        --timeout)   require_value "$@"; TIMEOUT_SEC="$2"; shift 2 ;;
         --bsp-discover) BSP_DISCOVER=1; shift ;;
-        --bsp-profile)  BSP_PROFILE="$2"; shift 2 ;;
-        --bsp-target)   BSP_TARGET="$2"; shift 2 ;;
-        --image)     IMAGE="$2"; shift 2 ;;
+        --bsp-profile)  require_value "$@"; BSP_PROFILE="$2"; shift 2 ;;
+        --bsp-target)   require_value "$@"; BSP_TARGET="$2"; shift 2 ;;
+        --image)     require_value "$@"; IMAGE="$2"; shift 2 ;;
+        --allow-dirty) ALLOW_DIRTY=1; shift ;;
+        --acceptance) ACCEPTANCE=1; shift ;;
+        --workspace-manifest) require_value "$@"; WORKSPACE_MANIFEST="$2"; shift 2 ;;
+        --runtime-image) require_value "$@"; RUNTIME_IMAGE="$2"; shift 2 ;;
+        --runtime-digest) require_value "$@"; RUNTIME_DIGEST="$2"; shift 2 ;;
         --no-docker) NO_DOCKER=1; shift ;;
         --quiet)     QUIET=1; shift ;;
         -h|--help)   usage; exit 0 ;;
-        *) echo "quetz-run: unknown argument '$1' (see --help)" >&2; exit 1 ;;
+        *) emit_setup_error "unknown argument '$1' (see --help)" ;;
     esac
 done
 
@@ -97,9 +144,136 @@ print_banner
 mkdir -p "${OUT_DIR}" || { echo "quetz-run: cannot create ${OUT_DIR}" >&2; exit 1; }
 OUT_DIR="$(cd "${OUT_DIR}" && pwd)"
 : > "${OUT_DIR}/sst.log"
-rm -f "${OUT_DIR}/transcript.txt" "${OUT_DIR}/stats.csv" "${OUT_DIR}/result.txt"
+for artifact in \
+    "${OUT_DIR}/transcript.txt" "${OUT_DIR}/uart.txt" \
+    "${OUT_DIR}/events.jsonl" "${OUT_DIR}/stats.csv" \
+    "${OUT_DIR}/result.txt" "${OUT_DIR}/result.json" \
+    "${OUT_DIR}/effective-run.json" "${OUT_DIR}/workspace-provenance.json" \
+    "${OUT_DIR}/build-packages.txt" "${OUT_DIR}/runtime-packages.txt"; do
+    # Host mode stages this file into /out before re-entering the runner.
+    [ -n "${WORKSPACE_MANIFEST}" ] && [ "${artifact}" = "${WORKSPACE_MANIFEST}" ] \
+        || rm -f "${artifact}"
+done
+OUTPUT_INITIALIZED=1
 
-fail_setup() { echo "quetz-run: $1" >&2; echo "ERROR: $1" > "${OUT_DIR}/result.txt"; exit 1; }
+fail_setup() {
+    emit_setup_error "$1"
+}
+
+contract_root()
+{
+    local candidate
+    for candidate in "${WORKSPACE}" /opt/quetz; do
+        if [ -n "${candidate}" ] && [ -f "${candidate}/tools/validate_quetz_contract.py" ]; then
+            echo "${candidate}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+json_value()
+{
+    python3 -c 'import json,sys
+value=json.load(open(sys.argv[1], encoding="utf-8"))
+for part in sys.argv[2].split("."):
+    value=value[int(part)] if isinstance(value, list) else value[part]
+print(value)' "$1" "$2"
+}
+
+resolve_workspace_path()
+{
+    local relative="$1"
+    case "${relative}" in
+        sst-elements/*)
+            if [ -d /src/sst-elements ]; then
+                echo "/src/sst-elements/${relative#sst-elements/}"
+            else
+                echo "${WORKSPACE}/${relative}"
+            fi ;;
+        *) echo "${WORKSPACE}/${relative}" ;;
+    esac
+}
+
+configure_board()
+{
+    [ -n "${BOARD}" ] || return 0
+    [ "${BOARD}" = raptor ] || fail_setup "unknown board preset: ${BOARD}"
+    [ -n "${WORKSPACE}" ] || fail_setup "workspace is required for --board raptor"
+    [ -n "${BOARD_MANIFEST}" ] || BOARD_MANIFEST="${WORKSPACE}/boards/raptor/board.json"
+    [ -f "${BOARD_MANIFEST}" ] || fail_setup "board manifest not found: ${BOARD_MANIFEST}"
+    [ -n "${ORACLE}" ] || fail_setup "--board raptor requires --oracle"
+    [ -f "${ORACLE}" ] || fail_setup "oracle not found: ${ORACLE}"
+    [ -n "${FIRMWARE}" ] || fail_setup "--board raptor requires --firmware"
+    [ -f "${FIRMWARE}" ] || fail_setup "firmware not found: ${FIRMWARE}"
+
+    local root
+    root="$(contract_root)" || fail_setup "Quetz contract tools not found"
+    python3 "${root}/tools/validate_raptor_board.py" "${BOARD_MANIFEST}" --quiet \
+        || fail_setup "board manifest validation failed"
+    python3 "${root}/tools/validate_quetz_contract.py" oracle "${ORACLE}" \
+        --board "${BOARD_MANIFEST}" >/dev/null \
+        || fail_setup "oracle validation failed"
+
+    ORACLE_ID="$(json_value "${ORACLE}" id)"
+    local preset_index preset_id preset_class oracle_class
+    preset_index="$(python3 -c 'import json,sys
+b=json.load(open(sys.argv[1], encoding="utf-8"))
+matches=[i for i,p in enumerate(b["runner_presets"]) if sys.argv[2] in p["allowed_oracles"]]
+if len(matches) != 1: raise SystemExit(1)
+print(matches[0])' "${BOARD_MANIFEST}" "${ORACLE_ID}")" \
+        || fail_setup "oracle ${ORACLE_ID} must select exactly one Raptor preset"
+    preset_id="$(json_value "${BOARD_MANIFEST}" "runner_presets.${preset_index}.id")"
+    preset_class="$(json_value "${BOARD_MANIFEST}" "runner_presets.${preset_index}.classification")"
+    oracle_class="$(json_value "${ORACLE}" classification)"
+    [ "${oracle_class}" = "${preset_class}" ] \
+        || fail_setup "oracle classification ${oracle_class} does not match preset ${preset_class}"
+    if [ "${ACCEPTANCE}" = 1 ] && [ "${preset_class}" != acceptance ]; then
+        fail_setup "Raptor acceptance mode rejects legacy-diagnostic preset ${preset_id}"
+    fi
+
+    local kv key
+    for kv in ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}; do
+        case "${kv}" in *=*) ;; *) fail_setup "--env requires KEY=VALUE: ${kv}" ;; esac
+        key="${kv%%=*}"
+        case "${key}" in
+            QUETZ_MMIO_START|QUETZ_MMIO_END|QUETZ_RAM_START|QUETZ_RAM_END|QUETZ_UART_ADDR|QUETZ_SENTINEL_ADDR)
+                fail_setup "--board raptor rejects geometry override ${key}" ;;
+        esac
+    done
+
+    local geometry_key geometry_value
+    for geometry_key in QUETZ_MMIO_START QUETZ_MMIO_END QUETZ_RAM_START \
+        QUETZ_RAM_END QUETZ_UART_ADDR QUETZ_SENTINEL_ADDR; do
+        if env | grep -q "^${geometry_key}="; then
+            fail_setup "--board raptor rejects inherited geometry ${geometry_key}"
+        fi
+        geometry_value="$(python3 -c 'import json,sys
+b=json.load(open(sys.argv[1], encoding="utf-8")); print(b["runner_presets"][int(sys.argv[2])]["environment"][sys.argv[3]])' "${BOARD_MANIFEST}" "${preset_index}" "${geometry_key}")"
+        export "${geometry_key}=${geometry_value}"
+    done
+    [ -n "${DECK}" ] \
+        || DECK="$(resolve_workspace_path "$(json_value "${BOARD_MANIFEST}" "runner_presets.${preset_index}.deck")")"
+    local preset_profile
+    preset_profile="$(python3 -c 'import json,sys
+b=json.load(open(sys.argv[1], encoding="utf-8")); v=b["runner_presets"][int(sys.argv[2])]["profile"]; print(v or "")' "${BOARD_MANIFEST}" "${preset_index}")"
+    if [ -z "${BSP_PROFILE}" ] && [ -n "${preset_profile}" ]; then
+        BSP_PROFILE="$(resolve_workspace_path "${preset_profile}")"
+    fi
+    if [ "${preset_class}" = acceptance ] && [ -n "${BSP_PROFILE}" ]; then
+        fail_setup "Raptor acceptance preset ${preset_id} rejects compatibility profiles"
+    fi
+    [ -f "${DECK}" ] || fail_setup "deck not found: ${DECK}"
+    if [ -n "${BSP_PROFILE}" ]; then
+        [ -f "${BSP_PROFILE}" ] || fail_setup "board profile not found: ${BSP_PROFILE}"
+    fi
+    [ -n "${STDIN_FILE}" ] || STDIN_FILE="$(dirname "${DECK}")/data/gps_nmea.txt"
+    [ -n "${SENSOR_FILE}" ] || SENSOR_FILE="$(dirname "${DECK}")/data/sensor_stream.bin"
+    [ -f "${STDIN_FILE}" ] || fail_setup "UART input fixture not found: ${STDIN_FILE}"
+    [ -f "${SENSOR_FILE}" ] || fail_setup "sensor fixture not found: ${SENSOR_FILE}"
+}
+
+configure_board
 
 # ---------------------------------------------------------------------------
 # In-container (or --no-docker) execution: run sst directly.
@@ -117,7 +291,7 @@ if [ "${NO_DOCKER}" = 1 ] || [ -f /.dockerenv ]; then
     export QUETZ_MMIO_PAYLOAD="${QUETZ_MMIO_PAYLOAD:-1}"
     export QUETZ_MMIO_START="${QUETZ_MMIO_START:-0x70000000}"
     export QUETZ_MMIO_END="${QUETZ_MMIO_END:-0x7001FFFF}"
-    export QUETZ_STDOUT_FILE="${OUT_DIR}/transcript.txt"
+    export QUETZ_STDOUT_FILE="${OUT_DIR}/uart.txt"
     export QUETZ_STATS_OUT="${OUT_DIR}/stats.csv"
     [ -n "${FIRMWARE}" ]    && export QUETZ_EXE="${FIRMWARE}"
     [ -n "${STDIN_FILE}" ]  && export QUETZ_STDIN_FILE="${STDIN_FILE}"
@@ -140,13 +314,79 @@ if [ "${NO_DOCKER}" = 1 ] || [ -f /.dockerenv ]; then
 
     command -v sst >/dev/null || fail_setup "sst not on PATH (use the quetz-sim image, or omit --no-docker)"
 
+    if [ -n "${BOARD}" ]; then
+        [ -n "${WORKSPACE_MANIFEST}" ] && [ -f "${WORKSPACE_MANIFEST}" ] \
+            || fail_setup "Raptor run requires workspace provenance"
+        [ -n "${RUNTIME_IMAGE}" ] || fail_setup "Raptor run requires runtime image identity"
+        [ -n "${RUNTIME_DIGEST}" ] || fail_setup "Raptor run requires runtime image digest"
+        ROOT="$(contract_root)" || fail_setup "Quetz contract tools not found"
+        QEMU_VERSION="$(qemu-system-m68k --version 2>/dev/null || true)"
+        QEMU_VERSION="${QEMU_VERSION%%$'\n'*}"
+        SST_VERSION="$(sst --version 2>/dev/null || true)"
+        SST_VERSION="${SST_VERSION%%$'\n'*}"
+        QUETZ_VERSION="$(python3 -c 'import json,sys
+m=json.load(open(sys.argv[1], encoding="utf-8"))
+print(next((s["head"] for s in m["submodules"] if s["path"] == "sst-elements"), "unknown"))' "${WORKSPACE_MANIFEST}")"
+        MANIFEST_ARGS=(
+            --run-id "${ORACLE_ID}-run"
+            --board "${BOARD_MANIFEST}"
+            --firmware "${FIRMWARE}"
+            --oracle "${ORACLE}"
+            --workspace-manifest "${WORKSPACE_MANIFEST}"
+            --image "${RUNTIME_IMAGE}"
+            --image-digest "${RUNTIME_DIGEST}"
+            --qemu "${QEMU_VERSION:-unknown}"
+            --sst "${SST_VERSION:-unknown}"
+            --quetz "${QUETZ_VERSION}"
+            --output "${OUT_DIR}/effective-run.json"
+        )
+        for argument in "${ORIGINAL_ARGS[@]}"; do
+            MANIFEST_ARGS+=("--command-arg=${argument}")
+        done
+        for geometry_key in QUETZ_MMIO_START QUETZ_MMIO_END QUETZ_RAM_START \
+            QUETZ_RAM_END QUETZ_UART_ADDR QUETZ_SENTINEL_ADDR; do
+            MANIFEST_ARGS+=("--environment=${geometry_key}=${!geometry_key}")
+        done
+        for package_snapshot in build-packages runtime-packages; do
+            if [ -f "/opt/quetz/${package_snapshot}.txt" ]; then
+                cp -f "/opt/quetz/${package_snapshot}.txt" \
+                    "${OUT_DIR}/${package_snapshot}.txt"
+                MANIFEST_ARGS+=(
+                    "--input=${package_snapshot}=${OUT_DIR}/${package_snapshot}.txt"
+                )
+            fi
+        done
+        MANIFEST_ARGS+=(
+            "--input=deck=${DECK}"
+            "--input=uart-input=${STDIN_FILE}"
+            "--input=sensor-input=${SENSOR_FILE}"
+            "--environment=QUETZ_BSP_TARGET=${BSP_TARGET}"
+        )
+        if [ -n "${BSP_PROFILE}" ]; then
+            MANIFEST_ARGS+=(
+                "--input=profile=${BSP_PROFILE}"
+                "--environment=QUETZ_BSP_PROFILE=${BSP_PROFILE}"
+            )
+        fi
+        python3 "${ROOT}/tools/create_quetz_run_manifest.py" "${MANIFEST_ARGS[@]}" \
+            >> "${OUT_DIR}/sst.log" 2>&1 \
+            || fail_setup "effective run manifest creation failed"
+    fi
+
     cd "${OUT_DIR}"
+    START_SECONDS="$(date +%s)"
     if command -v timeout >/dev/null; then
         timeout "${TIMEOUT_SEC}" sst "${DECK}" >> "${OUT_DIR}/sst.log" 2>&1
     else
         sst "${DECK}" >> "${OUT_DIR}/sst.log" 2>&1   # no coreutils timeout (macOS)
     fi
     SST_RC=$?
+    END_SECONDS="$(date +%s)"
+    DURATION_MS="$(( (END_SECONDS - START_SECONDS) * 1000 ))"
+
+    if [ -f "${OUT_DIR}/uart.txt" ]; then
+        cp -f "${OUT_DIR}/uart.txt" "${OUT_DIR}/transcript.txt"
+    fi
 
     # Discovery is postprocessed even when the guest times out: a stuck BSP is
     # the expected first run, and its final repeated read is the useful result.
@@ -163,6 +403,55 @@ if [ "${NO_DOCKER}" = 1 ] || [ -f /.dockerenv ]; then
             echo "WARN: BSP discovery postprocessing failed; raw log retained" \
                 >> "${OUT_DIR}/sst.log"
         fi
+    fi
+
+    if [ -n "${BOARD}" ]; then
+        [ "${SST_RC}" = 0 ] || fail_setup "simulator exited ${SST_RC}"
+        [ -s "${OUT_DIR}/uart.txt" ] || fail_setup "guest UART artifact is missing or empty"
+        if grep -Eiq 'fatal|profile[^[:alnum:]]+error|traceback' "${OUT_DIR}/sst.log"; then
+            fail_setup "fatal simulator or profile diagnostic observed"
+        fi
+        python3 "${ROOT}/tools/validate_quetz_contract.py" uart-event \
+            --transcript "${OUT_DIR}/uart.txt" --output "${OUT_DIR}/events.jsonl" \
+            >> "${OUT_DIR}/sst.log" 2>&1 \
+            || fail_setup "UART event generation failed"
+        EVALUATE_ARGS=(
+            --oracle "${ORACLE}"
+            --events "${OUT_DIR}/events.jsonl"
+            --duration-ms "${DURATION_MS}"
+            --board "${BOARD_MANIFEST}"
+            --run-manifest "${OUT_DIR}/effective-run.json"
+            --workspace-manifest "${WORKSPACE_MANIFEST}"
+            --artifact "uart=${OUT_DIR}/uart.txt=text/plain"
+            --artifact "events=${OUT_DIR}/events.jsonl=application/x-ndjson"
+            --artifact "sst-log=${OUT_DIR}/sst.log=text/plain"
+            --artifact "effective-run=${OUT_DIR}/effective-run.json=application/json"
+            --artifact "workspace-provenance=${WORKSPACE_MANIFEST}=application/json"
+            --output "${OUT_DIR}/result.json"
+        )
+        [ -f "${OUT_DIR}/stats.csv" ] \
+            && EVALUATE_ARGS+=(--artifact "stats=${OUT_DIR}/stats.csv=text/csv")
+        for package_snapshot in build-packages runtime-packages; do
+            [ -f "${OUT_DIR}/${package_snapshot}.txt" ] \
+                && EVALUATE_ARGS+=(
+                    --artifact "${package_snapshot}=${OUT_DIR}/${package_snapshot}.txt=text/plain"
+                )
+        done
+        if ! EVALUATION_OUTPUT="$(python3 "${ROOT}/tools/validate_quetz_contract.py" \
+                evaluate "${EVALUATE_ARGS[@]}" 2>&1)"; then
+            echo "${EVALUATION_OUTPUT}" >> "${OUT_DIR}/sst.log"
+            fail_setup "oracle evaluation failed"
+        fi
+        RESULT="$(json_value "${OUT_DIR}/result.json" outcome)"
+        DETAIL="$(json_value "${OUT_DIR}/result.json" completion.detail)"
+        if [ "${RESULT}" = PASS ]; then
+            RC=0
+        else
+            RC=2
+        fi
+        echo "${RESULT}: ${DETAIL}" > "${OUT_DIR}/result.txt"
+        [ "${QUIET}" = 1 ] || echo "quetz-run: ${RESULT} — artifacts in ${OUT_DIR}" >&2
+        exit "${RC}"
     fi
 
     RESULT="ERROR" ; RC=1 ; DETAIL="no TestFinisher sentinel in output (sst exit ${SST_RC})"
@@ -184,13 +473,22 @@ fi
 command -v docker >/dev/null || fail_setup "docker not found (or use --no-docker on a host with sst installed)"
 [ -n "${WORKSPACE}" ] || fail_setup "workspace not found (run from the raptor-balar checkout)"
 
-if ! docker image inspect "${IMAGE}" >/dev/null 2>&1; then
-    if docker image inspect "raptor-quetz-test:arm64" >/dev/null 2>&1; then
-        echo "quetz-run: image '${IMAGE}' not found; falling back to raptor-quetz-test:arm64" >&2
-        IMAGE="raptor-quetz-test:arm64"
+docker image inspect "${IMAGE}" >/dev/null 2>&1 \
+    || fail_setup "image '${IMAGE}' not found — build the explicitly requested image"
+RUNTIME_IMAGE="${IMAGE}"
+RUNTIME_DIGEST="$(docker image inspect "${IMAGE}" --format '{{.Id}}')"
+
+if [ -n "${BOARD}" ]; then
+    ROOT="$(contract_root)" || fail_setup "Quetz contract tools not found"
+    PROVENANCE_ARGS=(--workspace "${WORKSPACE}" --output "${OUT_DIR}/workspace-provenance.json")
+    if [ "${ALLOW_DIRTY}" = 1 ]; then
+        PROVENANCE_ARGS+=(--mode development --allow-dirty)
     else
-        fail_setup "image '${IMAGE}' not found — build it: docker build --target runtime -t quetz-sim -f quetz-docker/Dockerfile ."
+        PROVENANCE_ARGS+=(--mode strict)
     fi
+    python3 "${ROOT}/tools/quetz_provenance.py" "${PROVENANCE_ARGS[@]}" \
+        || fail_setup "workspace identity check failed"
+    WORKSPACE_MANIFEST="${OUT_DIR}/workspace-provenance.json"
 fi
 
 mkdir -p "${OUT_DIR}/inputs"
@@ -206,6 +504,7 @@ stage_file() {  # $1 host path, $2 flag name -> echoes container path
 }
 
 if [ -n "${DECK}" ]; then
+    [ -f "${DECK}" ] || fail_setup "deck not found: ${DECK}"
     case "$(cd "$(dirname "${DECK}")" && pwd)/" in
         "${WORKSPACE}/sst-elements/"*)
             # Deck inside the tree: translate to the container mount so its
@@ -216,7 +515,18 @@ if [ -n "${DECK}" ]; then
             RUN_ARGS+=(--deck "$(stage_file "${DECK}" --deck)") ;;
     esac
 fi
-[ -n "${FIRMWARE}" ]    && RUN_ARGS+=(--firmware "$(stage_file "${FIRMWARE}" --firmware)")
+if [ -n "${BOARD}" ]; then
+    RUN_ARGS+=(
+        --board "${BOARD}"
+        --board-manifest "$(stage_file "${BOARD_MANIFEST}" --board-manifest)"
+        --oracle "$(stage_file "${ORACLE}" --oracle)"
+        --workspace-manifest /out/workspace-provenance.json
+        --runtime-image "${RUNTIME_IMAGE}"
+        --runtime-digest "${RUNTIME_DIGEST}"
+    )
+    [ "${ACCEPTANCE}" = 1 ] && RUN_ARGS+=(--acceptance)
+fi
+[ -n "${FIRMWARE}" ] && RUN_ARGS+=(--firmware "$(stage_file "${FIRMWARE}" --firmware)")
 [ -n "${STDIN_FILE}" ]  && RUN_ARGS+=(--stdin  "$(stage_file "${STDIN_FILE}" --stdin)")
 [ -n "${SENSOR_FILE}" ] && RUN_ARGS+=(--sensor "$(stage_file "${SENSOR_FILE}" --sensor)")
 [ -n "${SINK_NAME}" ]   && RUN_ARGS+=(--sink "$(basename "${SINK_NAME}")")
@@ -225,10 +535,13 @@ for kv in ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}; do RUN_ARGS+=(--env "${kv}"); done
 
 docker run --rm \
     -v "${WORKSPACE}/sst-elements:/src/sst-elements:ro" \
+    -v "${WORKSPACE}:/workspace:ro" \
     -v "${OUT_DIR}:/out" \
     -v "${SCRIPT_DIR}:/quetz-docker:ro" \
     "${IMAGE}" \
     bash /quetz-docker/quetz-run "${RUN_ARGS[@]}"
 RC=$?
+[ -f "${OUT_DIR}/result.json" ] \
+    || fail_setup "container execution failed (docker exit ${RC})"
 [ "${QUIET}" = 1 ] || { [ -f "${OUT_DIR}/result.txt" ] && echo "quetz-run: $(cat "${OUT_DIR}/result.txt") — artifacts in ${OUT_DIR}" >&2; }
 exit "${RC}"

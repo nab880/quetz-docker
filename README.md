@@ -21,18 +21,35 @@ Use it to build and run the Quetz regression suite without installing SST or QEM
 
 The `runtime` image target is the user-facing product: the sim + patched QEMU
 + m68k/riscv cross compilers, no build system. `quetz-run` wraps it with an
-artifacts + exit-code contract (0 = guest PASS sentinel, 2 = FAIL,
-1 = error/timeout):
+artifacts + exit-code contract (0 = host oracle PASS, 2 = FAIL,
+1 = setup/simulator error or timeout):
 
 ```bash
 docker build --target runtime -t quetz-sim -f quetz-docker/Dockerfile .
 ./quetz-docker/quetz-run --out artifacts/          # shipped ColdFire demo
 ./quetz-docker/quetz-run --firmware my_app.elf --stdin my_gps.nmea \
                          --sensor my_stream.bin --out artifacts/
+
+# Raptor legacy diagnostic; dirty workspaces require the explicit opt-in.
+./quetz-docker/quetz-run --board raptor \
+    --firmware ./raptor-hello.elf \
+    --oracle ./tests/raptor/level1-legacy.json \
+    --allow-dirty --out artifacts/raptor-legacy
 ```
 
-Artifacts: `transcript.txt` (guest serial), `stats.csv`, `sst.log`,
-`result.txt`. Own deck: start from
+Raptor-only CI may add `--build-arg QEMU_TARGET_LIST=m68k-softmmu`; the default
+keeps the full multi-architecture Quetz target set.
+
+Raptor runs separate guest bytes in `uart.txt` from diagnostics in `sst.log`
+and add `events.jsonl`, `result.json`, `effective-run.json`, and
+`workspace-provenance.json`, plus build/runtime package snapshots from the
+image. `transcript.txt` remains a guest-only compatibility copy. Missing
+images, decks, firmware, board files, and oracles fail without a fallback.
+Board geometry comes from the validated board preset; `--env` geometry
+overrides are rejected.
+
+Generic-run artifacts remain `transcript.txt` (guest serial), `stats.csv`,
+`sst.log`, and `result.txt`. Own deck: start from
 `sst-elements/src/sst/elements/quetz/tests/sysmode/template_system.py`.
 Fixture tooling lives in `sst-elements/.../quetz/tools/`.
 
@@ -220,11 +237,13 @@ Environment variables set in the container:
 
 ---
 
-## QEMU overlay (pinned)
+## QEMU overlay (source-pinned)
 
 **Base: upstream QEMU 9.2.1** (fetched from download.qemu.org in the
-Dockerfile; `ARG QEMU_VERSION` pins it). The overlay lives with the Quetz
-element at `sst-elements/src/sst/elements/quetz/qemu-overlay/` and is applied
+Dockerfile; its SHA-256 is verified before extraction). The Ubuntu base image
+is digest-pinned. A release gate still needs an immutable package snapshot.
+The overlay lives with the Quetz element at
+`sst-elements/src/sst/elements/quetz/qemu-overlay/` and is applied
 by `apply-qemu-overlay.sh`. It fails loudly if any piece does not apply, so a
 QEMU version bump cannot silently drop the overlay.
 

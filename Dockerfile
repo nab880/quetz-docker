@@ -15,7 +15,7 @@
 # NOTE: images bake the element at build time — rebuild after sst-elements
 # changes (the test scripts rebuild from the /src mount; quetz-run does not).
 
-FROM ubuntu:24.04 AS build
+FROM ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90 AS build
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV SST_PREFIX=/opt/sst
@@ -51,22 +51,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc-riscv64-linux-gnu \
     libc6-dev-riscv64-cross \
     gcc-m68k-linux-gnu \
+    && mkdir -p /opt/quetz \
+    && dpkg-query -W > /opt/quetz/build-packages.txt \
     && rm -rf /var/lib/apt/lists/*
 
 # Ubuntu/Fedora packages do not ship qemu-plugin.h — build QEMU 9.2 with plugins.
 ARG QEMU_VERSION=9.2.1
+ARG QEMU_SHA256=72874fe9c395ced0c7fd7c22c43744072697f7ee1926a72237bd81784b2faf62
+ARG QEMU_TARGET_LIST=riscv64-softmmu,aarch64-softmmu,arm-softmmu,i386-softmmu,m68k-softmmu,riscv64-linux-user,aarch64-linux-user,x86_64-linux-user
+ARG BUILD_JOBS=2
 ENV QEMU_PREFIX=/opt/qemu
 COPY sst-elements/src/sst/elements/quetz/qemu-overlay /docker/qemu-overlay
-RUN curl -fsSL "https://download.qemu.org/qemu-${QEMU_VERSION}.tar.xz" \
-        | tar xJ -C /tmp \
+RUN curl -fsSL -o "/tmp/qemu-${QEMU_VERSION}.tar.xz" \
+        "https://download.qemu.org/qemu-${QEMU_VERSION}.tar.xz" \
+    && echo "${QEMU_SHA256}  /tmp/qemu-${QEMU_VERSION}.tar.xz" | sha256sum -c - \
+    && tar xJf "/tmp/qemu-${QEMU_VERSION}.tar.xz" -C /tmp \
     && cd "/tmp/qemu-${QEMU_VERSION}" \
     && sh /docker/qemu-overlay/apply-qemu-overlay.sh "/tmp/qemu-${QEMU_VERSION}" \
     && ./configure \
          --prefix="${QEMU_PREFIX}" \
-         --target-list=riscv64-softmmu,aarch64-softmmu,arm-softmmu,i386-softmmu,m68k-softmmu,riscv64-linux-user,aarch64-linux-user,x86_64-linux-user \
+         --target-list="${QEMU_TARGET_LIST}" \
          --enable-plugins \
-    && make -j2 \
-    && make -j2 plugins \
+    && make -j"${BUILD_JOBS}" \
+    && make -j"${BUILD_JOBS}" plugins \
     && make install \
     && mkdir -p "${QEMU_PREFIX}/include" \
     && (test -f "${QEMU_PREFIX}/include/qemu-plugin.h" \
@@ -78,20 +85,19 @@ RUN curl -fsSL "https://download.qemu.org/qemu-${QEMU_VERSION}.tar.xz" \
     && (cp -a build/contrib/plugins/*.so "${QEMU_PREFIX}/lib/qemu/plugins/" 2>/dev/null \
         || cp -a contrib/plugins/*.so "${QEMU_PREFIX}/lib/qemu/plugins/" 2>/dev/null \
         || true) \
-    && rm -rf "/tmp/qemu-${QEMU_VERSION}"
+    && rm -rf "/tmp/qemu-${QEMU_VERSION}" "/tmp/qemu-${QEMU_VERSION}.tar.xz"
 
 ENV QEMU_PLUGIN_DIR="${QEMU_PREFIX}/lib/qemu/plugins"
 
 # Tests look for QEMU under $SST_PREFIX/bin first.
 RUN mkdir -p "${SST_PREFIX}/bin" "${SST_PREFIX}/lib" "${SST_PREFIX}/libexec" \
-    && ln -sf "${QEMU_PREFIX}/bin/qemu-riscv64"        "${SST_PREFIX}/bin/qemu-riscv64" \
-    && ln -sf "${QEMU_PREFIX}/bin/qemu-aarch64"       "${SST_PREFIX}/bin/qemu-aarch64" \
-    && ln -sf "${QEMU_PREFIX}/bin/qemu-x86_64"        "${SST_PREFIX}/bin/qemu-x86_64" \
-    && ln -sf "${QEMU_PREFIX}/bin/qemu-system-riscv64" "${SST_PREFIX}/bin/qemu-system-riscv64" \
-    && ln -sf "${QEMU_PREFIX}/bin/qemu-system-aarch64" "${SST_PREFIX}/bin/qemu-system-aarch64" \
-    && ln -sf "${QEMU_PREFIX}/bin/qemu-system-i386"    "${SST_PREFIX}/bin/qemu-system-i386" \
-    && ln -sf "${QEMU_PREFIX}/bin/qemu-system-arm"     "${SST_PREFIX}/bin/qemu-system-arm" \
-    && ln -sf "${QEMU_PREFIX}/bin/qemu-system-m68k"    "${SST_PREFIX}/bin/qemu-system-m68k"
+    && for emulator in qemu-riscv64 qemu-aarch64 qemu-x86_64 \
+        qemu-system-riscv64 qemu-system-aarch64 qemu-system-i386 \
+        qemu-system-arm qemu-system-m68k; do \
+        if [ -x "${QEMU_PREFIX}/bin/${emulator}" ]; then \
+            ln -sf "${QEMU_PREFIX}/bin/${emulator}" "${SST_PREFIX}/bin/${emulator}"; \
+        fi; \
+    done
 
 WORKDIR /src
 
@@ -103,17 +109,20 @@ COPY sst-elements /src/sst-elements
 # old `qemu-system-x86_64 --version | head -1` always passed: x86_64-softmmu
 # is not even in the target list and head's exit status masked the 127).
 RUN "${QEMU_PREFIX}/bin/qemu-system-m68k" --version \
-    && "${QEMU_PREFIX}/bin/qemu-system-riscv64" --version
+    && test -f "${QEMU_PREFIX}/include/qemu-plugin.h"
 
 # --- SST-Core ---
 RUN cd /src/sst-core \
     && ./autogen.sh \
     && mkdir -p /build/sst-core && cd /build/sst-core \
     && /src/sst-core/configure --prefix="${SST_PREFIX}" \
-    && make -j2 install
+    && make -j"${BUILD_JOBS}" install
 
-# --- SST-Elements (memHierarchy + quetz; other elements optional) ---
-RUN cd /src/sst-elements \
+# --- SST-Elements (only the Raptor runtime dependencies) ---
+RUN find /src/sst-elements/src/sst/elements -mindepth 1 -maxdepth 1 -type d \
+         ! -name memHierarchy ! -name mmu ! -name quetz \
+         -exec touch '{}/.ignore' \; \
+    && cd /src/sst-elements \
     && ./autogen.sh \
     && find /src/sst-elements/src/sst/elements/quetz -name '*.lo' -delete \
     && mkdir -p /build/sst-elements && cd /build/sst-elements \
@@ -122,15 +131,18 @@ RUN cd /src/sst-elements \
          --with-sst-core="${SST_PREFIX}" \
          --with-qemu-prefix="${QEMU_PREFIX}" \
          --without-pin \
-    && make -j2 install
+    && make -j"${BUILD_JOBS}" install
 
 # Register element libraries and test paths.
 RUN "${SST_PREFIX}/bin/sst-register" SST_ELEMENT_SOURCE quetz=/src/sst-elements/src/sst/elements/quetz \
     && "${SST_PREFIX}/bin/sst-register" SST_ELEMENT_TESTS quetz=/src/sst-elements/src/sst/elements/quetz/tests
 
+COPY tools /opt/quetz/tools
+COPY schemas /opt/quetz/schemas
 COPY quetz-docker/run-quetz-tests.sh /usr/local/bin/run-quetz-tests.sh
 COPY quetz-docker/quetz-run /usr/local/bin/quetz-run
-RUN chmod +x /usr/local/bin/run-quetz-tests.sh /usr/local/bin/quetz-run
+COPY quetz-docker/quetz-result.py /usr/local/bin/quetz-result.py
+RUN chmod +x /usr/local/bin/run-quetz-tests.sh /usr/local/bin/quetz-run /usr/local/bin/quetz-result.py
 
 WORKDIR /src/sst-elements/src/sst/elements/quetz/tests
 CMD ["/usr/local/bin/run-quetz-tests.sh"]
@@ -139,7 +151,7 @@ CMD ["/usr/local/bin/run-quetz-tests.sh"]
 # Runtime image (quetz-sim): everything needed to RUN simulations and build
 # guest firmware — no autotools, no /build tree, no testsuite scaffolding.
 # ---------------------------------------------------------------------------
-FROM ubuntu:24.04 AS runtime
+FROM ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90 AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV SST_PREFIX=/opt/sst
@@ -162,17 +174,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     openmpi-bin \
     python3 \
     zlib1g \
+    && mkdir -p /opt/quetz \
+    && dpkg-query -W > /opt/quetz/runtime-packages.txt \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /opt/qemu /opt/qemu
 COPY --from=build /opt/sst /opt/sst
+COPY --from=build /opt/quetz /opt/quetz
 # The element source tree: decks, test helpers, firmware + fixtures, docs.
 # (sst-register paths in /opt/sst/etc point here.)
 COPY --from=build /src/sst-elements/src/sst/elements/quetz /src/sst-elements/src/sst/elements/quetz
 
 COPY quetz-docker/quetz-run /usr/local/bin/quetz-run
 COPY quetz-docker/BSP-HONESTY.txt /usr/local/bin/BSP-HONESTY.txt
-RUN chmod +x /usr/local/bin/quetz-run
+COPY quetz-docker/quetz-result.py /usr/local/bin/quetz-result.py
+RUN chmod +x /usr/local/bin/quetz-run /usr/local/bin/quetz-result.py
 
 WORKDIR /work
 CMD ["quetz-run", "--help"]
