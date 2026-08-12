@@ -62,9 +62,10 @@ ARG QEMU_TARGET_LIST=riscv64-softmmu,aarch64-softmmu,arm-softmmu,i386-softmmu,m6
 ARG BUILD_JOBS=2
 ENV QEMU_PREFIX=/opt/qemu
 COPY sst-elements/src/sst/elements/quetz/qemu-overlay /docker/qemu-overlay
-RUN curl -fsSL -o "/tmp/qemu-${QEMU_VERSION}.tar.xz" \
-        "https://download.qemu.org/qemu-${QEMU_VERSION}.tar.xz" \
-    && echo "${QEMU_SHA256}  /tmp/qemu-${QEMU_VERSION}.tar.xz" | sha256sum -c - \
+# Host-fetched tarball under quetz-docker/cache/ (corp TLS interception breaks
+# curl→download.qemu.org inside the build). Keep checksum verification.
+COPY quetz-docker/cache/qemu-9.2.1.tar.xz /tmp/qemu-9.2.1.tar.xz
+RUN echo "${QEMU_SHA256}  /tmp/qemu-${QEMU_VERSION}.tar.xz" | sha256sum -c - \
     && tar xJf "/tmp/qemu-${QEMU_VERSION}.tar.xz" -C /tmp \
     && cd "/tmp/qemu-${QEMU_VERSION}" \
     && sh /docker/qemu-overlay/apply-qemu-overlay.sh "/tmp/qemu-${QEMU_VERSION}" \
@@ -119,8 +120,12 @@ RUN cd /src/sst-core \
     && make -j"${BUILD_JOBS}" install
 
 # --- SST-Elements (only the Raptor runtime dependencies) ---
+# merlin is required by the GPU/accelerator compute decks
+# (basic_quetz_gpu_compute*.py use merlin.hr_router / merlin.singlerouter for
+# the on-chip router); without it those decks fatal with
+# "can't find requested component 'merlin.hr_router'".
 RUN find /src/sst-elements/src/sst/elements -mindepth 1 -maxdepth 1 -type d \
-         ! -name memHierarchy ! -name mmu ! -name quetz \
+         ! -name memHierarchy ! -name mmu ! -name quetz ! -name merlin \
          -exec touch '{}/.ignore' \; \
     && cd /src/sst-elements \
     && ./autogen.sh \

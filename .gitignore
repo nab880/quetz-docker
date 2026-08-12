@@ -1,2 +1,5 @@
 # Local test outputs
 *.log
+
+# Local build cache (QEMU tarball / corp CA for TLS-intercepted networks)
+cache/

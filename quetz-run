@@ -4,7 +4,7 @@
 #   quetz-run [--board raptor] [--oracle JSON] [--deck PATH] [--firmware ELF]
 #             [--stdin FILE] [--sensor FILE]
 #             [--sink NAME] [--env K=V]... [--out DIR] [--timeout SEC]
-#             [--bsp-discover] [--bsp-profile JSON] [--bsp-target mcf5208]
+#             [--bsp-discover] [--bsp-profile JSON] [--bsp-target raptor]
 #             [--image NAME] [--allow-dirty] [--acceptance]
 #             [--no-docker] [--quiet]
 #
@@ -67,7 +67,7 @@ NO_DOCKER=0
 QUIET=0
 BSP_DISCOVER=0
 BSP_PROFILE=""
-BSP_TARGET="mcf5208"
+BSP_TARGET="raptor"
 OUTPUT_INITIALIZED=0
 declare -a EXTRA_ENV=()
 
