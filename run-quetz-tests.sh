@@ -77,6 +77,26 @@ if command -v m68k-linux-gnu-gcc >/dev/null 2>&1; then
         echo "  building coldfire_gpu_fft..."
         ${M68K_CC} ${M68K_FLAGS} -DFFT_FIXED_POINT coldfire_startup.S coldfire_gpu_fft.c \
             -o coldfire_gpu_fft || echo "WARN: coldfire_gpu_fft build failed"
+        # Raptor BSP bring-up firmware (A1-A4). These are edited alongside the
+        # mcf-bsp-compat / mcf-dtimer / mcf-gpio devices and the startup contract,
+        # so they MUST be rebuilt from source here — a stale prebuilt ELF silently
+        # runs the old probe catalogue (this bit the first A1/A3 rebuild).
+        for fw in bsp_torture coldfire_gpio; do
+            if [ -f "${fw}.c" ]; then
+                echo "  building ${fw}..."
+                ${M68K_CC} ${M68K_FLAGS} coldfire_startup.S "${fw}.c" -o "${fw}" \
+                    || echo "WARN: ${fw} build failed"
+            fi
+        done
+        # coldfire_bsp_startup (A4) has its own BSP-shaped startup + linker script
+        # (reproduces crt0.c's SR/RAMBAR/SP/VBR sequence), not coldfire_startup.S.
+        if [ -f coldfire_bsp_startup.c ]; then
+            echo "  building coldfire_bsp_startup..."
+            ${M68K_CC} -mcpu=5208 -O2 -nostdlib -nostartfiles -ffreestanding \
+                -T link_m68k_bsp_startup.ld -Wl,--build-id=none \
+                coldfire_bsp_startup.S coldfire_bsp_startup.c -o coldfire_bsp_startup \
+                || echo "WARN: coldfire_bsp_startup build failed"
+        fi
         echo "  building expanded ColdFire regression firmware..."
         (cd expanded && ./build.sh)
     )
