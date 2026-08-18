@@ -9,7 +9,12 @@
 #     UPDATE_GOLD=1 ./quetz-docker/build-and-test.sh
 #
 #   user runtime (slim: sim + cross compilers + quetz-run; no build tree):
-#     docker build --target runtime -t quetz-sim -f quetz-docker/Dockerfile .
+#     docker build --target runtime \
+#       --build-arg QUETZ_WORKSPACE_REVISION="$(git rev-parse HEAD)" \
+#       --build-arg QUETZ_DOCKER_REVISION="$(git -C quetz-docker rev-parse HEAD)" \
+#       --build-arg QUETZ_SST_CORE_REVISION="$(git -C sst-core rev-parse HEAD)" \
+#       --build-arg QUETZ_SST_ELEMENTS_REVISION="$(git -C sst-elements rev-parse HEAD)" \
+#       -t quetz-sim -f quetz-docker/Dockerfile .
 #     ./quetz-docker/quetz-run              # runs the ColdFire system demo
 #
 # NOTE: images bake the element at build time — rebuild after sst-elements
@@ -157,6 +162,15 @@ CMD ["/usr/local/bin/run-quetz-tests.sh"]
 # guest firmware — no autotools, no /build tree, no testsuite scaffolding.
 # ---------------------------------------------------------------------------
 FROM ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90 AS runtime
+
+ARG QUETZ_WORKSPACE_REVISION=unknown
+ARG QUETZ_DOCKER_REVISION=unknown
+ARG QUETZ_SST_CORE_REVISION=unknown
+ARG QUETZ_SST_ELEMENTS_REVISION=unknown
+LABEL org.quetz.workspace.revision="${QUETZ_WORKSPACE_REVISION}" \
+      org.quetz.submodule.quetz-docker="${QUETZ_DOCKER_REVISION}" \
+      org.quetz.submodule.sst-core="${QUETZ_SST_CORE_REVISION}" \
+      org.quetz.submodule.sst-elements="${QUETZ_SST_ELEMENTS_REVISION}"
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV SST_PREFIX=/opt/sst

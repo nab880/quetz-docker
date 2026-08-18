@@ -25,6 +25,7 @@ artifacts + exit-code contract (0 = host oracle PASS, 2 = FAIL,
 1 = setup/simulator error or timeout):
 
 ```bash
+./quetz-docker/fetch-qemu.sh
 docker build --target runtime -t quetz-sim -f quetz-docker/Dockerfile .
 ./quetz-docker/quetz-run --out artifacts/          # shipped ColdFire demo
 ./quetz-docker/quetz-run --firmware my_app.elf --stdin my_gps.nmea \
@@ -36,6 +37,27 @@ docker build --target runtime -t quetz-sim -f quetz-docker/Dockerfile .
     --oracle ./tests/raptor/level1-legacy.json \
     --allow-dirty --out artifacts/raptor-legacy
 ```
+
+Production Raptor acceptance additionally binds the image to the clean source
+checkout. Build it from the umbrella workspace with revision labels:
+
+```bash
+./quetz-docker/fetch-qemu.sh
+docker build --target runtime \
+    --build-arg QUETZ_WORKSPACE_REVISION="$(git rev-parse HEAD)" \
+    --build-arg QUETZ_DOCKER_REVISION="$(git -C quetz-docker rev-parse HEAD)" \
+    --build-arg QUETZ_SST_CORE_REVISION="$(git -C sst-core rev-parse HEAD)" \
+    --build-arg QUETZ_SST_ELEMENTS_REVISION="$(git -C sst-elements rev-parse HEAD)" \
+    -t quetz-sim -f quetz-docker/Dockerfile .
+./quetz-docker/quetz-run --board raptor --acceptance \
+    --image quetz-sim \
+    --firmware exports/bsp/self-test-bsp_test-31d27705cf51/bsp_test.elf \
+    --oracle tests/raptor/level2-self-test.json \
+    --out artifacts/raptor-level2
+```
+
+Acceptance rejects an unlabeled/stale image, dirty workspace, execution-input
+override, or direct host `--no-docker` path.
 
 Raptor-only CI may add `--build-arg QEMU_TARGET_LIST=m68k-softmmu`; the default
 keeps the full multi-architecture Quetz target set.

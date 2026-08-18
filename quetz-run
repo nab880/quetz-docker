@@ -15,7 +15,7 @@
 #   uart.txt        guest UART bytes only
 #   events.jsonl    ordered host semantic events
 #   sst.log         SST/QEMU diagnostics only
-#   stats.csv       SST statistics (CSV)
+#   stats.csv       SST statistics (CSV, when flushed before completion)
 #   result.txt      PASS / FAIL / ERROR + detail
 #   result.json     structured oracle result
 #   effective-run.json and workspace-provenance.json  exact run identity
@@ -47,6 +47,7 @@ fi
 QUETZ_REL="src/sst/elements/quetz"
 
 DECK=""
+DECK_EXPLICIT=0
 FIRMWARE=""
 BOARD=""
 BOARD_MANIFEST=""
@@ -62,12 +63,14 @@ SENSOR_FILE=""
 SINK_NAME=""
 OUT_DIR="./artifacts"
 TIMEOUT_SEC=600
+TIMEOUT_EXPLICIT=0
 IMAGE="quetz-sim"
 NO_DOCKER=0
 QUIET=0
 BSP_DISCOVER=0
 BSP_PROFILE=""
 BSP_TARGET="raptor"
+UART_EVENT_PORT="uart0"
 OUTPUT_INITIALIZED=0
 declare -a EXTRA_ENV=()
 
@@ -115,14 +118,14 @@ while [ $# -gt 0 ]; do
         --board)     require_value "$@"; BOARD="$2"; shift 2 ;;
         --board-manifest) require_value "$@"; BOARD_MANIFEST="$2"; shift 2 ;;
         --oracle)    require_value "$@"; ORACLE="$2"; shift 2 ;;
-        --deck)      require_value "$@"; DECK="$2"; shift 2 ;;
+        --deck)      require_value "$@"; DECK="$2"; DECK_EXPLICIT=1; shift 2 ;;
         --firmware)  require_value "$@"; FIRMWARE="$2"; shift 2 ;;
         --stdin)     require_value "$@"; STDIN_FILE="$2"; shift 2 ;;
         --sensor)    require_value "$@"; SENSOR_FILE="$2"; shift 2 ;;
         --sink)      require_value "$@"; SINK_NAME="$2"; shift 2 ;;
         --env)       require_value "$@"; EXTRA_ENV+=("$2"); shift 2 ;;
         --out)       require_value "$@"; OUT_DIR="$2"; shift 2 ;;
-        --timeout)   require_value "$@"; TIMEOUT_SEC="$2"; shift 2 ;;
+        --timeout)   require_value "$@"; TIMEOUT_SEC="$2"; TIMEOUT_EXPLICIT=1; shift 2 ;;
         --bsp-discover) BSP_DISCOVER=1; shift ;;
         --bsp-profile)  require_value "$@"; BSP_PROFILE="$2"; shift 2 ;;
         --bsp-target)   require_value "$@"; BSP_TARGET="$2"; shift 2 ;;
@@ -209,11 +212,33 @@ configure_board()
 
     local root
     root="$(contract_root)" || fail_setup "Quetz contract tools not found"
+    if [ "${ACCEPTANCE}" = 1 ]; then
+        local canonical_board canonical_oracle candidate
+        canonical_board="${WORKSPACE}/boards/raptor/board.json"
+        [ -f "${canonical_board}" ] && cmp -s "${BOARD_MANIFEST}" "${canonical_board}" \
+            || fail_setup "Raptor acceptance requires the checked-in board contract"
+        canonical_oracle=""
+        for candidate in "${WORKSPACE}"/tests/raptor/*.json; do
+            if [ -f "${candidate}" ] && cmp -s "${ORACLE}" "${candidate}"; then
+                canonical_oracle="${candidate}"
+                break
+            fi
+        done
+        [ -n "${canonical_oracle}" ] \
+            || fail_setup "Raptor acceptance requires a checked-in oracle"
+    fi
     python3 "${root}/tools/validate_raptor_board.py" "${BOARD_MANIFEST}" --quiet \
         || fail_setup "board manifest validation failed"
     python3 "${root}/tools/validate_quetz_contract.py" oracle "${ORACLE}" \
         --board "${BOARD_MANIFEST}" >/dev/null \
         || fail_setup "oracle validation failed"
+    local oracle_timeout
+    oracle_timeout="$(json_value "${ORACLE}" timeout_seconds)"
+    if [ "${TIMEOUT_EXPLICIT}" = 0 ]; then
+        TIMEOUT_SEC="${oracle_timeout}"
+    elif [ "${ACCEPTANCE}" = 1 ] && [ "${TIMEOUT_SEC}" != "${oracle_timeout}" ]; then
+        fail_setup "Raptor acceptance requires oracle timeout ${oracle_timeout}"
+    fi
 
     ORACLE_ID="$(json_value "${ORACLE}" id)"
     local preset_index preset_id preset_class oracle_class
@@ -230,6 +255,16 @@ print(matches[0])' "${BOARD_MANIFEST}" "${ORACLE_ID}")" \
         || fail_setup "oracle classification ${oracle_class} does not match preset ${preset_class}"
     if [ "${ACCEPTANCE}" = 1 ] && [ "${preset_class}" != acceptance ]; then
         fail_setup "Raptor acceptance mode rejects legacy-diagnostic preset ${preset_id}"
+    fi
+    if [ "${ACCEPTANCE}" = 1 ]; then
+        [ "${ALLOW_DIRTY}" = 0 ] \
+            || fail_setup "Raptor acceptance requires strict workspace provenance"
+        [ "${DECK_EXPLICIT}" = 0 ] \
+            || fail_setup "Raptor acceptance rejects deck overrides"
+        [ "${BSP_DISCOVER}" = 0 ] \
+            || fail_setup "Raptor acceptance rejects BSP discovery mode"
+        [ "${#EXTRA_ENV[@]}" = 0 ] \
+            || fail_setup "Raptor acceptance rejects environment overrides"
     fi
 
     local kv key
@@ -275,10 +310,24 @@ b=json.load(open(sys.argv[1], encoding="utf-8")); v=b["runner_presets"][int(sys.
 
 configure_board
 
+if [ "${ACCEPTANCE}" = 1 ] \
+    && { [ "${NO_DOCKER}" = 1 ] || [ -f /.dockerenv ]; }; then
+    [ -f /.dockerenv ] && [ "${SCRIPT_DIR}" = /quetz-docker ] \
+        && [ "${WORKSPACE}" = /workspace ] \
+        || fail_setup "Raptor acceptance requires the container-managed runtime"
+fi
+
 # ---------------------------------------------------------------------------
 # In-container (or --no-docker) execution: run sst directly.
 # ---------------------------------------------------------------------------
 if [ "${NO_DOCKER}" = 1 ] || [ -f /.dockerenv ]; then
+    if [ "${ACCEPTANCE}" = 1 ]; then
+        # Canonical deck/runtime inputs come from the preset and runtime image,
+        # never an inherited shell environment.
+        unset QUETZ_QEMU QUETZ_PLUGIN QUETZ_LOADER QUETZ_BSP_PROFILE \
+            QUETZ_BSP_DISCOVER QUETZ_SST_WIN_START QUETZ_SST_WIN_END QUETZ_EXE \
+            QUETZ_CLOCK
+    fi
     ELEM_DIR=""
     for c in "/src/sst-elements/${QUETZ_REL}" "${WORKSPACE}/sst-elements/${QUETZ_REL}"; do
         [ -n "${c}" ] && [ -d "${c}" ] && ELEM_DIR="${c}" && break
@@ -312,11 +361,24 @@ if [ "${NO_DOCKER}" = 1 ] || [ -f /.dockerenv ]; then
     fi
     for kv in ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}; do export "${kv?}"; done
 
+    if [ -n "${BOARD}" ]; then
+        case "${QUETZ_UART_ADDR}" in
+            0xfc060000|0xFC060000) UART_EVENT_PORT="uart0" ;;
+            0xfc064000|0xFC064000) UART_EVENT_PORT="uart1" ;;
+            0xfc068000|0xFC068000) UART_EVENT_PORT="uart2" ;;
+            *) fail_setup "unsupported Raptor console UART address ${QUETZ_UART_ADDR}" ;;
+        esac
+    fi
+
     command -v sst >/dev/null || fail_setup "sst not on PATH (use the quetz-sim image, or omit --no-docker)"
 
     if [ -n "${BOARD}" ]; then
         [ -n "${WORKSPACE_MANIFEST}" ] && [ -f "${WORKSPACE_MANIFEST}" ] \
             || fail_setup "Raptor run requires workspace provenance"
+        if [ "${ACCEPTANCE}" = 1 ] && \
+                [ "$(json_value "${WORKSPACE_MANIFEST}" mode)" != strict ]; then
+            fail_setup "Raptor acceptance requires strict workspace provenance"
+        fi
         [ -n "${RUNTIME_IMAGE}" ] || fail_setup "Raptor run requires runtime image identity"
         [ -n "${RUNTIME_DIGEST}" ] || fail_setup "Raptor run requires runtime image digest"
         ROOT="$(contract_root)" || fail_setup "Quetz contract tools not found"
@@ -375,7 +437,21 @@ print(next((s["head"] for s in m["submodules"] if s["path"] == "sst-elements"), 
 
     cd "${OUT_DIR}"
     START_SECONDS="$(date +%s)"
-    if command -v timeout >/dev/null; then
+    if [ -n "${BOARD}" ] \
+        && [ "$(json_value "${ORACLE}" firmware.production)" = True ]; then
+        # Production firmware cannot be modified to write a test sentinel and
+        # often has no guest exit path. Supervise its UART completion matcher
+        # live, stop the complete SST/QEMU process group, then let the normal
+        # host oracle evaluation below classify PASS versus FAIL.
+        python3 "${ROOT}/tools/run_until_uart_completion.py" \
+            --oracle "${ORACLE}" \
+            --uart "${OUT_DIR}/uart.txt" \
+            --port "${UART_EVENT_PORT}" \
+            --timeout "${TIMEOUT_SEC}" \
+            -- sst "${DECK}" >> "${OUT_DIR}/sst.log" 2>&1
+    elif command -v timeout >/dev/null; then
+        # Preserve the legacy diagnostic path: guest TestFinisher/simulator
+        # completion remains authoritative for non-production firmware.
         timeout "${TIMEOUT_SEC}" sst "${DECK}" >> "${OUT_DIR}/sst.log" 2>&1
     else
         sst "${DECK}" >> "${OUT_DIR}/sst.log" 2>&1   # no coreutils timeout (macOS)
@@ -383,6 +459,9 @@ print(next((s["head"] for s in m["submodules"] if s["path"] == "sst-elements"), 
     SST_RC=$?
     END_SECONDS="$(date +%s)"
     DURATION_MS="$(( (END_SECONDS - START_SECONDS) * 1000 ))"
+    # Host-defined completion can stop SST before its CSV backend flushes.
+    # Do not publish a zero-byte file as a statistics artifact.
+    [ -s "${OUT_DIR}/stats.csv" ] || rm -f "${OUT_DIR}/stats.csv"
 
     if [ -f "${OUT_DIR}/uart.txt" ]; then
         cp -f "${OUT_DIR}/uart.txt" "${OUT_DIR}/transcript.txt"
@@ -408,11 +487,14 @@ print(next((s["head"] for s in m["submodules"] if s["path"] == "sst-elements"), 
     if [ -n "${BOARD}" ]; then
         [ "${SST_RC}" = 0 ] || fail_setup "simulator exited ${SST_RC}"
         [ -s "${OUT_DIR}/uart.txt" ] || fail_setup "guest UART artifact is missing or empty"
-        if grep -Eiq 'fatal|profile[^[:alnum:]]+error|traceback' "${OUT_DIR}/sst.log"; then
-            fail_setup "fatal simulator or profile diagnostic observed"
+        if grep -Eiq \
+                'RAPTOR_MMIO_UNSUPPORTED|fatal|profile[^[:alnum:]]+error|traceback' \
+                "${OUT_DIR}/sst.log"; then
+            fail_setup "strict-MMIO, fatal simulator, or profile diagnostic observed"
         fi
         python3 "${ROOT}/tools/validate_quetz_contract.py" uart-event \
             --transcript "${OUT_DIR}/uart.txt" --output "${OUT_DIR}/events.jsonl" \
+            --port "${UART_EVENT_PORT}" \
             >> "${OUT_DIR}/sst.log" 2>&1 \
             || fail_setup "UART event generation failed"
         EVALUATE_ARGS=(
@@ -489,6 +571,26 @@ if [ -n "${BOARD}" ]; then
     python3 "${ROOT}/tools/quetz_provenance.py" "${PROVENANCE_ARGS[@]}" \
         || fail_setup "workspace identity check failed"
     WORKSPACE_MANIFEST="${OUT_DIR}/workspace-provenance.json"
+    if [ "${ACCEPTANCE}" = 1 ]; then
+        IMAGE_LABELS="$(docker image inspect "${IMAGE}" --format '{{json .Config.Labels}}')" \
+            || fail_setup "cannot read runtime image source labels"
+        python3 -c 'import json,sys
+m=json.load(open(sys.argv[1], encoding="utf-8"))
+labels=json.loads(sys.argv[2]) or {}
+submodules={item["path"]: item["head"] for item in m["submodules"]}
+expected={
+    "org.quetz.workspace.revision": m["workspace"]["commit"],
+    "org.quetz.submodule.quetz-docker": submodules["quetz-docker"],
+    "org.quetz.submodule.sst-core": submodules["sst-core"],
+    "org.quetz.submodule.sst-elements": submodules["sst-elements"],
+}
+mismatches=[f"{key}: image={labels.get(key)!r}, workspace={value!r}"
+            for key,value in expected.items() if labels.get(key) != value]
+if mismatches:
+    print("runtime image source mismatch: " + "; ".join(mismatches), file=sys.stderr)
+    raise SystemExit(1)' "${WORKSPACE_MANIFEST}" "${IMAGE_LABELS}" \
+            || fail_setup "runtime image does not match strict workspace provenance"
+    fi
 fi
 
 mkdir -p "${OUT_DIR}/inputs"
@@ -503,7 +605,7 @@ stage_file() {  # $1 host path, $2 flag name -> echoes container path
     echo "/out/inputs/$(basename "${host}")"
 }
 
-if [ -n "${DECK}" ]; then
+if [ -n "${DECK}" ] && [ "${DECK_EXPLICIT}" = 1 ]; then
     [ -f "${DECK}" ] || fail_setup "deck not found: ${DECK}"
     case "$(cd "$(dirname "${DECK}")" && pwd)/" in
         "${WORKSPACE}/sst-elements/"*)
