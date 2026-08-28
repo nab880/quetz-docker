@@ -73,6 +73,7 @@ BSP_TARGET="raptor"
 UART_EVENT_PORT="uart0"
 OUTPUT_INITIALIZED=0
 declare -a EXTRA_ENV=()
+PRESET_ENV_KEYS="QUETZ_MMIO_START QUETZ_MMIO_END QUETZ_RAM_START QUETZ_RAM_END QUETZ_UART_ADDR QUETZ_SENTINEL_ADDR"
 
 usage() {
     sed -n '2,/^set -u$/p' "${BASH_SOURCE[0]}" \
@@ -149,7 +150,8 @@ OUT_DIR="$(cd "${OUT_DIR}" && pwd)"
 : > "${OUT_DIR}/sst.log"
 for artifact in \
     "${OUT_DIR}/transcript.txt" "${OUT_DIR}/uart.txt" \
-    "${OUT_DIR}/events.jsonl" "${OUT_DIR}/stats.csv" \
+    "${OUT_DIR}/events.jsonl" "${OUT_DIR}/uart-events.jsonl" \
+    "${OUT_DIR}/accelerator-events.jsonl" "${OUT_DIR}/stats.csv" \
     "${OUT_DIR}/result.txt" "${OUT_DIR}/result.json" \
     "${OUT_DIR}/effective-run.json" "${OUT_DIR}/workspace-provenance.json" \
     "${OUT_DIR}/build-packages.txt" "${OUT_DIR}/runtime-packages.txt"; do
@@ -267,22 +269,30 @@ print(matches[0])' "${BOARD_MANIFEST}" "${ORACLE_ID}")" \
             || fail_setup "Raptor acceptance rejects environment overrides"
     fi
 
+    PRESET_ENV_KEYS="$(python3 -c 'import json,sys
+b=json.load(open(sys.argv[1], encoding="utf-8"))
+print(" ".join(sorted(b["runner_presets"][int(sys.argv[2])]["environment"])))' \
+        "${BOARD_MANIFEST}" "${preset_index}")"
+
     local kv key
     for kv in ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}; do
         case "${kv}" in *=*) ;; *) fail_setup "--env requires KEY=VALUE: ${kv}" ;; esac
         key="${kv%%=*}"
         case "${key}" in
-            QUETZ_MMIO_START|QUETZ_MMIO_END|QUETZ_RAM_START|QUETZ_RAM_END|QUETZ_UART_ADDR|QUETZ_SENTINEL_ADDR)
+            QUETZ_MMIO_PAYLOAD|QUETZ_MMIO_START|QUETZ_MMIO_END|QUETZ_RAM_START|QUETZ_RAM_END|QUETZ_UART_ADDR|QUETZ_SENTINEL_ADDR|QUETZ_SST_WIN_START|QUETZ_SST_WIN_END)
                 fail_setup "--board raptor rejects geometry override ${key}" ;;
         esac
     done
 
     local geometry_key geometry_value
-    for geometry_key in QUETZ_MMIO_START QUETZ_MMIO_END QUETZ_RAM_START \
-        QUETZ_RAM_END QUETZ_UART_ADDR QUETZ_SENTINEL_ADDR; do
+    for geometry_key in QUETZ_MMIO_PAYLOAD QUETZ_MMIO_START QUETZ_MMIO_END \
+        QUETZ_RAM_START QUETZ_RAM_END QUETZ_UART_ADDR QUETZ_SENTINEL_ADDR \
+        QUETZ_SST_WIN_START QUETZ_SST_WIN_END; do
         if env | grep -q "^${geometry_key}="; then
             fail_setup "--board raptor rejects inherited geometry ${geometry_key}"
         fi
+    done
+    for geometry_key in ${PRESET_ENV_KEYS}; do
         geometry_value="$(python3 -c 'import json,sys
 b=json.load(open(sys.argv[1], encoding="utf-8")); print(b["runner_presets"][int(sys.argv[2])]["environment"][sys.argv[3]])' "${BOARD_MANIFEST}" "${preset_index}" "${geometry_key}")"
         export "${geometry_key}=${geometry_value}"
@@ -325,8 +335,8 @@ if [ "${NO_DOCKER}" = 1 ] || [ -f /.dockerenv ]; then
         # Canonical deck/runtime inputs come from the preset and runtime image,
         # never an inherited shell environment.
         unset QUETZ_QEMU QUETZ_PLUGIN QUETZ_LOADER QUETZ_BSP_PROFILE \
-            QUETZ_BSP_DISCOVER QUETZ_SST_WIN_START QUETZ_SST_WIN_END QUETZ_EXE \
-            QUETZ_CLOCK
+            QUETZ_BSP_DISCOVER QUETZ_EXE \
+            QUETZ_ACCELERATOR_EVENTS_FILE QUETZ_CLOCK
     fi
     ELEM_DIR=""
     for c in "/src/sst-elements/${QUETZ_REL}" "${WORKSPACE}/sst-elements/${QUETZ_REL}"; do
@@ -342,6 +352,10 @@ if [ "${NO_DOCKER}" = 1 ] || [ -f /.dockerenv ]; then
     export QUETZ_MMIO_END="${QUETZ_MMIO_END:-0x7001FFFF}"
     export QUETZ_STDOUT_FILE="${OUT_DIR}/uart.txt"
     export QUETZ_STATS_OUT="${OUT_DIR}/stats.csv"
+    # Accelerator-capable decks may pass this path to a durable model event
+    # producer. Any resulting stream is validated and merged below before it
+    # can influence an oracle.
+    export QUETZ_ACCELERATOR_EVENTS_FILE="${OUT_DIR}/accelerator-events.jsonl"
     [ -n "${FIRMWARE}" ]    && export QUETZ_EXE="${FIRMWARE}"
     [ -n "${STDIN_FILE}" ]  && export QUETZ_STDIN_FILE="${STDIN_FILE}"
     [ -n "${SENSOR_FILE}" ] && export QUETZ_SENSOR_FILE="${SENSOR_FILE}"
@@ -405,8 +419,7 @@ print(next((s["head"] for s in m["submodules"] if s["path"] == "sst-elements"), 
         for argument in "${ORIGINAL_ARGS[@]}"; do
             MANIFEST_ARGS+=("--command-arg=${argument}")
         done
-        for geometry_key in QUETZ_MMIO_START QUETZ_MMIO_END QUETZ_RAM_START \
-            QUETZ_RAM_END QUETZ_UART_ADDR QUETZ_SENTINEL_ADDR; do
+        for geometry_key in ${PRESET_ENV_KEYS}; do
             MANIFEST_ARGS+=("--environment=${geometry_key}=${!geometry_key}")
         done
         for package_snapshot in build-packages runtime-packages; do
@@ -493,10 +506,23 @@ print(next((s["head"] for s in m["submodules"] if s["path"] == "sst-elements"), 
             fail_setup "strict-MMIO, fatal simulator, or profile diagnostic observed"
         fi
         python3 "${ROOT}/tools/validate_quetz_contract.py" uart-event \
-            --transcript "${OUT_DIR}/uart.txt" --output "${OUT_DIR}/events.jsonl" \
+            --transcript "${OUT_DIR}/uart.txt" --output "${OUT_DIR}/uart-events.jsonl" \
             --port "${UART_EVENT_PORT}" \
             >> "${OUT_DIR}/sst.log" 2>&1 \
             || fail_setup "UART event generation failed"
+        EVENT_INPUTS=(--input "${OUT_DIR}/uart-events.jsonl")
+        if [ -e "${OUT_DIR}/accelerator-events.jsonl" ]; then
+            python3 "${ROOT}/tools/validate_quetz_contract.py" \
+                accelerator-event-stream "${OUT_DIR}/accelerator-events.jsonl" \
+                >> "${OUT_DIR}/sst.log" 2>&1 \
+                || fail_setup "accelerator event stream validation failed"
+            EVENT_INPUTS+=(--input "${OUT_DIR}/accelerator-events.jsonl")
+        fi
+        python3 "${ROOT}/tools/validate_quetz_contract.py" merge-events \
+            "${EVENT_INPUTS[@]}" --output "${OUT_DIR}/events.jsonl" \
+            >> "${OUT_DIR}/sst.log" 2>&1 \
+            || fail_setup "event stream merge failed"
+        rm -f "${OUT_DIR}/uart-events.jsonl"
         EVALUATE_ARGS=(
             --oracle "${ORACLE}"
             --events "${OUT_DIR}/events.jsonl"
@@ -513,6 +539,10 @@ print(next((s["head"] for s in m["submodules"] if s["path"] == "sst-elements"), 
         )
         [ -f "${OUT_DIR}/stats.csv" ] \
             && EVALUATE_ARGS+=(--artifact "stats=${OUT_DIR}/stats.csv=text/csv")
+        [ -f "${OUT_DIR}/accelerator-events.jsonl" ] \
+            && EVALUATE_ARGS+=(
+                --artifact "accelerator-events=${OUT_DIR}/accelerator-events.jsonl=application/x-ndjson"
+            )
         for package_snapshot in build-packages runtime-packages; do
             [ -f "${OUT_DIR}/${package_snapshot}.txt" ] \
                 && EVALUATE_ARGS+=(
