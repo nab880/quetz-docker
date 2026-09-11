@@ -4,7 +4,7 @@
 #   quetz-run [--board raptor] [--oracle JSON] [--deck PATH] [--firmware ELF]
 #             [--stdin FILE] [--sensor FILE]
 #             [--sink NAME] [--env K=V]... [--out DIR] [--timeout SEC]
-#             [--bsp-discover] [--bsp-profile JSON] [--bsp-target raptor]
+#             [--bsp-discover] [--bsp-profile JSON] [--bsp-target TARGET]
 #             [--image NAME] [--allow-dirty] [--acceptance]
 #             [--no-docker] [--quiet]
 #
@@ -70,6 +70,7 @@ QUIET=0
 BSP_DISCOVER=0
 BSP_PROFILE=""
 BSP_TARGET="raptor"
+BSP_TARGET_EXPLICIT=0
 UART_EVENT_PORT="uart0"
 OUTPUT_INITIALIZED=0
 declare -a EXTRA_ENV=()
@@ -129,7 +130,7 @@ while [ $# -gt 0 ]; do
         --timeout)   require_value "$@"; TIMEOUT_SEC="$2"; TIMEOUT_EXPLICIT=1; shift 2 ;;
         --bsp-discover) BSP_DISCOVER=1; shift ;;
         --bsp-profile)  require_value "$@"; BSP_PROFILE="$2"; shift 2 ;;
-        --bsp-target)   require_value "$@"; BSP_TARGET="$2"; shift 2 ;;
+        --bsp-target)   require_value "$@"; BSP_TARGET="$2"; BSP_TARGET_EXPLICIT=1; shift 2 ;;
         --image)     require_value "$@"; IMAGE="$2"; shift 2 ;;
         --allow-dirty) ALLOW_DIRTY=1; shift ;;
         --acceptance) ACCEPTANCE=1; shift ;;
@@ -311,6 +312,16 @@ b=json.load(open(sys.argv[1], encoding="utf-8")); v=b["runner_presets"][int(sys.
     [ -f "${DECK}" ] || fail_setup "deck not found: ${DECK}"
     if [ -n "${BSP_PROFILE}" ]; then
         [ -f "${BSP_PROFILE}" ] || fail_setup "board profile not found: ${BSP_PROFILE}"
+        local profile_target
+        profile_target="$(json_value "${BSP_PROFILE}" target)"
+        case "${profile_target}" in
+            raptor|mcf5208-legacy) ;;
+            *) fail_setup "unsupported BSP profile target ${profile_target}" ;;
+        esac
+        if [ "${BSP_TARGET_EXPLICIT}" = 1 ] && [ "${BSP_TARGET}" != "${profile_target}" ]; then
+            fail_setup "BSP target ${BSP_TARGET} does not match profile target ${profile_target}"
+        fi
+        BSP_TARGET="${profile_target}"
     fi
     [ -n "${STDIN_FILE}" ] || STDIN_FILE="$(dirname "${DECK}")/data/gps_nmea.txt"
     [ -n "${SENSOR_FILE}" ] || SENSOR_FILE="$(dirname "${DECK}")/data/sensor_stream.bin"
@@ -498,13 +509,16 @@ print(next((s["head"] for s in m["submodules"] if s["path"] == "sst-elements"), 
     fi
 
     if [ -n "${BOARD}" ]; then
-        [ "${SST_RC}" = 0 ] || fail_setup "simulator exited ${SST_RC}"
-        [ -s "${OUT_DIR}/uart.txt" ] || fail_setup "guest UART artifact is missing or empty"
+        # QEMU can reject a device after the plugin has attached. SST then
+        # drains the plugin EXIT and returns zero, with no guest UART output.
+        # Report that startup diagnostic before its missing-UART consequence.
         if grep -Eiq \
-                'RAPTOR_MMIO_UNSUPPORTED|fatal|profile[^[:alnum:]]+error|traceback' \
+                'RAPTOR_MMIO_UNSUPPORTED|mcf-bsp-compat:|fatal|profile[^[:alnum:]]+error|traceback' \
                 "${OUT_DIR}/sst.log"; then
             fail_setup "strict-MMIO, fatal simulator, or profile diagnostic observed"
         fi
+        [ "${SST_RC}" = 0 ] || fail_setup "simulator exited ${SST_RC}"
+        [ -s "${OUT_DIR}/uart.txt" ] || fail_setup "guest UART artifact is missing or empty"
         python3 "${ROOT}/tools/validate_quetz_contract.py" uart-event \
             --transcript "${OUT_DIR}/uart.txt" --output "${OUT_DIR}/uart-events.jsonl" \
             --port "${UART_EVENT_PORT}" \

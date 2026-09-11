@@ -117,6 +117,12 @@ COPY sst-elements /src/sst-elements
 RUN "${QEMU_PREFIX}/bin/qemu-system-m68k" --version \
     && test -f "${QEMU_PREFIX}/include/qemu-plugin.h"
 
+# Verify actual ColdFire cache instructions/register callbacks before stripping
+# host compilers from the runtime stage. This uses public diagnostic firmware.
+RUN python3 /src/sst-elements/src/sst/elements/quetz/tests/manual/run_coldfire_cache_api_probe.py \
+    --qemu "${QEMU_PREFIX}/bin/qemu-system-m68k" \
+    --qemu-plugin-include "${QEMU_PREFIX}/include"
+
 # --- SST-Core ---
 RUN cd /src/sst-core \
     && ./autogen.sh \
